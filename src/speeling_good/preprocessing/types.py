@@ -9,6 +9,32 @@ class RawPassage:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class EarlyDecision:
+    """Spelling judgment and the endpoint's native Choice confidence (0–1)."""
+
+    contains_spelling_error: bool
+    confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class EarlyDecisionFailure:
+    """An invalid decision response; attempt numbers start at one."""
+
+    attempt: int
+    error: str
+    response: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PassageWithEarlyDecision:
+    """A spelling judgment; None means no usable decision was obtained."""
+
+    text: str
+    decision: EarlyDecision | None
+    failures: list[EarlyDecisionFailure] = field(default_factory=list)
+
+
 type AnnotationSource = Literal["original_data"] | str
 """Name of the model that performed the annotation, or original_data if this dataset contains spelling annotations"""
 
