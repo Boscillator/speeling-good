@@ -1,7 +1,7 @@
 # prepare-fineweb
 
 Convert a streaming Hugging Face dataset into local, annotated examples using
-`LlmAnnotationProvider`.
+`EarlyDecisionProvider` followed by `LlmAnnotationProvider`.
 
 ## Interface
 
@@ -32,6 +32,15 @@ Top-level settings use these defaults:
 - `output`: `data/fineweb`; each invocation requires a fresh directory.
 - `workers`: `2` positive annotation threads.
 - `shard_size`: `10` positive input entries per shard.
+- `p_annotated_anyway`: `1.0`, a finite probability in `[0, 1]` for fully annotating
+  passages classified as clean. Errors and unknown decisions always receive full annotation.
+- `early_decision_endpoint`: `https://openrouter.ai/api/alpha`, using `MODEL_TOKEN`.
+
+The `early_decision` section uses `EarlyDecisionConfig`: `model` defaults to
+`typesafe/jev-1.13`, `max_attempts` to `3`, and `timeout` to `120.0`. Its spelling-only
+prompt matches the annotation policy. Confidence is retained unchanged without a
+threshold. The decision client is separate from the annotation client, allowing
+`MODEL_ENDPOINT` to point at another annotation service.
 
 The `annotation` section controls model requests:
 
@@ -76,22 +85,34 @@ it. Credentials are never written to the configuration or cache.
 Load the dataset with `streaming=True` and read consecutive batches of at most
 `shard_size` entries. Check once that the dataset schema declares a string `text`
 field, then rely on that schema when reading rows. Joblib threads
-annotate each batch concurrently through a shared provider, with at most `workers`
-active model requests. Results retain input order, and only one batch is held in
-memory at a time.
+process each batch concurrently through shared decision and annotation providers,
+with at most `workers` active model requests. Each passage gets a decision first.
+Unknown decisions proceed to full annotation with their diagnostics retained.
+Clean decisions are independently sampled for full annotation using
+`p_annotated_anyway`; at `1.0`, every passage is fully annotated for comparison.
+Skipped clean passages remain in output with `annotations: []` and their decision.
+Sampling occurs outside both caches; no random seed or cross-run reproducibility
+is promised. The annotation model receives only the text, without the decision.
+Results retain input order, and only one batch is held in memory at a time.
 
 Write one `part-00000.jsonl`, `part-00001.jsonl`, etc. per input batch. Each line
-contains `text`, `annotations`, and `failures`; each annotation contains `original`,
+contains `text`, `annotations`, `failures`, `decision`, and
+`early_decision_failures`; each annotation contains `original`,
 `corrected`, `span_start`, and `span_end` using half-open Python string offsets.
 Keep passages with no spelling mistakes, partial annotations, and exhausted output
 failures. `annotations: null` indicates no usable result, while `annotations: []`
-indicates a successful response with no mistakes. Failure records retain attempt
-numbers, decoding/resolution stages, errors, and raw response content. Transport
+indicates either a successful response with no mistakes or a skipped clean passage.
+There is no per-passage skipped status. `decision` is null for unknowns, otherwise
+it contains `contains_spelling_error` and native `confidence`. Early-decision
+diagnostics retain attempts, errors and raw responses separately from annotation
+failures. Annotation failure records retain attempt numbers, decoding/resolution
+stages, errors, and raw response content. Transport
 and other unexpected errors stop processing with a nonzero exit status.
 
 Write the resolved application configuration and normalized endpoint to
 `config.yaml` beside the shards. Log per-shard and final counts of written passages, usable results,
-failed results, and passages with failure history (including recovered results).
+failed results, passages with annotation or decision failure history (including
+recovered results), and skipped annotations.
 Each completed file replaces its destination atomically. Every invocation requires
 a new output directory; an existing directory raises `FileExistsError` before
 loading data. An interrupted run may leave completed shards and requires a new
@@ -102,9 +123,12 @@ stopping Parquet streams early (huggingface/datasets#8793).
 
 ## Caching
 
-Joblib `Memory` stores returned annotation results under `<output>/.cache`, keyed by
-passage text, the full annotation configuration (including prompt, sampling, timeout,
-and attempt budget), normalized endpoint, and an explicit annotation-cache version.
+Joblib `Memory` stores decision and annotation results separately under
+`<output>/.cache`. Decision keys include text, the full decision configuration,
+normalized decision endpoint and decision-cache version. Annotation keys include
+the passage with its decision and decision diagnostics, the full annotation
+configuration (including prompt, sampling, timeout and attempt budget), normalized
+annotation endpoint and annotation-cache version.
 Provider objects, clients, and credentials are excluded from cache identity.
 Partial and failed output results are cached with their diagnostics; raised errors
 are not cached. Bump the cache version when annotation resolution rules or output

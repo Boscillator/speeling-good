@@ -3,10 +3,17 @@ from threading import Event
 import pytest
 from pydantic import ValidationError
 
-from speeling_good.cli.prepare_fineweb import PrepareConfig, annotate_batches
+from speeling_good.cli.prepare_fineweb import (
+    PrepareConfig,
+    PreparedPassage,
+    annotate_batches,
+    should_annotate,
+)
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
+    EarlyDecision,
+    PassageWithEarlyDecision,
     SpellingAnnotation,
 )
 
@@ -22,26 +29,32 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
 
     def annotate(passage):
         if passage.text == "invalid":
-            return AnnotatedPassage(passage.text, None, [failure])
+            return PreparedPassage(AnnotatedPassage(passage.text, None, [failure]))
         if passage.text == "third":
-            return AnnotatedPassage(
-                passage.text, [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+            return PreparedPassage(
+                AnnotatedPassage(
+                    passage.text,
+                    [SpellingAnnotation("third", "thirds", 0, 5)],
+                    [failure],
+                )
             )
-        return AnnotatedPassage(passage.text, [])
+        return PreparedPassage(AnnotatedPassage(passage.text, []))
 
     batches = annotate_batches(rows(), annotate, take=4, shard_size=2, workers=2)
     first = next(batches)
     assert consumed == ["first", "invalid"]
     assert first == [
-        AnnotatedPassage("first", []),
-        AnnotatedPassage("invalid", None, [failure]),
+        PreparedPassage(AnnotatedPassage("first", [])),
+        PreparedPassage(AnnotatedPassage("invalid", None, [failure])),
     ]
     assert list(batches) == [
         [
-            AnnotatedPassage(
-                "third", [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+            PreparedPassage(
+                AnnotatedPassage(
+                    "third", [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+                )
             ),
-            AnnotatedPassage("fourth", []),
+            PreparedPassage(AnnotatedPassage("fourth", [])),
         ]
     ]
     assert consumed == ["first", "invalid", "third", "fourth"]
@@ -55,7 +68,9 @@ def test_concurrent_results_keep_input_order_with_a_partial_final_batch():
             assert second_finished.wait(5), "Annotations did not run concurrently"
         elif passage.text == "second":
             second_finished.set()
-        return AnnotatedPassage(passage.text, [])
+        return PreparedPassage(
+            AnnotatedPassage(passage.text, []), skipped=passage.text == "second"
+        )
 
     batches = list(
         annotate_batches(
@@ -67,8 +82,11 @@ def test_concurrent_results_keep_input_order_with_a_partial_final_batch():
         )
     )
     assert batches == [
-        [AnnotatedPassage("first", []), AnnotatedPassage("second", [])],
-        [AnnotatedPassage("third", [])],
+        [
+            PreparedPassage(AnnotatedPassage("first", [])),
+            PreparedPassage(AnnotatedPassage("second", []), skipped=True),
+        ],
+        [PreparedPassage(AnnotatedPassage("third", []))],
     ]
 
 
@@ -95,6 +113,18 @@ def test_nonvalidation_errors_stop_processing():
         ({"take": "all"}, ("take",)),
         ({"workers": True}, ("workers",)),
         ({"shard_size": -1}, ("shard_size",)),
+        ({"early_decision_endpoint": ""}, ("early_decision_endpoint",)),
+        ({"early_decision_endpoint": "   "}, ("early_decision_endpoint",)),
+        ({"early_decision_endpoint": "/"}, ("early_decision_endpoint",)),
+        ({"p_annotated_anyway": -0.1}, ("p_annotated_anyway",)),
+        ({"p_annotated_anyway": 1.1}, ("p_annotated_anyway",)),
+        ({"p_annotated_anyway": float("nan")}, ("p_annotated_anyway",)),
+        ({"p_annotated_anyway": float("inf")}, ("p_annotated_anyway",)),
+        ({"p_annotated_anyway": True}, ("p_annotated_anyway",)),
+        (
+            {"early_decision": {"model": "", "prompt": "Find errors."}},
+            ("early_decision", "model"),
+        ),
         ({"annotation": {"model": " "}}, ("annotation", "model")),
         ({"annotation": {"prompt": "\n"}}, ("annotation", "prompt")),
         ({"annotation": {"temperature": 2.1}}, ("annotation", "temperature")),
@@ -125,6 +155,10 @@ def test_invalid_run_settings_report_the_configuration_field(override, location)
         "output": "unused-output",
         "workers": 2,
         "shard_size": 5,
+        "early_decision": {
+            "model": "test-decision",
+            "prompt": "Find spelling mistakes.",
+        },
         "annotation": {"model": "test-model", "prompt": "Find spelling mistakes."},
     }
     annotation = config["annotation"] | override.get("annotation", {})
@@ -133,3 +167,27 @@ def test_invalid_run_settings_report_the_configuration_field(override, location)
     with pytest.raises(ValidationError) as raised:
         PrepareConfig.model_validate(config)
     assert location in [error["loc"] for error in raised.value.errors()]
+
+
+@pytest.mark.parametrize("probability", [0.0, 0.4, 1.0])
+@pytest.mark.parametrize("decision", [None, EarlyDecision(True, 0.01)])
+def test_errors_and_unknowns_are_always_annotated(monkeypatch, probability, decision):
+    def unexpected_sample():
+        pytest.fail("Only clean passages should be sampled")
+
+    monkeypatch.setattr(
+        "speeling_good.cli.prepare_fineweb.random.random", unexpected_sample
+    )
+    assert should_annotate(PassageWithEarlyDecision("text", decision), probability)
+
+
+@pytest.mark.parametrize(
+    "probability,draw,expected",
+    [(0.0, 0.0, False), (1.0, 0.999, True), (0.4, 0.399, True), (0.4, 0.4, False)],
+)
+def test_clean_passages_are_sampled_by_probability(
+    monkeypatch, probability, draw, expected
+):
+    monkeypatch.setattr("speeling_good.cli.prepare_fineweb.random.random", lambda: draw)
+    passage = PassageWithEarlyDecision("clean", EarlyDecision(False, 1.0))
+    assert should_annotate(passage, probability) is expected

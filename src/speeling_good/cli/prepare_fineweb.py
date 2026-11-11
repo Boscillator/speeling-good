@@ -2,9 +2,10 @@
 
 import json
 import os
+import random
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from itertools import islice
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -17,16 +18,25 @@ from joblib import Memory, Parallel, delayed
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from speeling_good.preprocessing.early_decision_provider import (
+    EarlyDecisionConfig,
+    EarlyDecisionProvider,
+)
 from speeling_good.preprocessing.llm_annotation_provider import (
     AnnotationConfig,
     LlmAnnotationProvider,
 )
-from speeling_good.preprocessing.types import AnnotatedPassage, RawPassage
+from speeling_good.preprocessing.types import (
+    AnnotatedPassage,
+    PassageWithEarlyDecision,
+    RawPassage,
+)
 
 # Bump when resolution rules or output types change; prompts are hashed directly.
-ANNOTATION_CACHE_VERSION = 2
+ANNOTATION_CACHE_VERSION = 3
+EARLY_DECISION_CACHE_VERSION = 1
 
 
 class PrepareConfig(BaseModel):
@@ -41,11 +51,45 @@ class PrepareConfig(BaseModel):
     output: Path
     workers: Annotated[int, Field(strict=True, gt=0)]
     shard_size: Annotated[int, Field(strict=True, gt=0)]
+    p_annotated_anyway: Annotated[
+        float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)
+    ] = 1.0
+    early_decision_endpoint: Annotated[str, Field(min_length=1)] = (
+        "https://openrouter.ai/api/alpha"
+    )
+    early_decision: EarlyDecisionConfig
     annotation: AnnotationConfig
+
+    @field_validator("early_decision_endpoint")
+    @classmethod
+    def normalize_decision_endpoint(cls, value: str) -> str:
+        endpoint = value.strip().rstrip("/")
+        if not endpoint:
+            raise ValueError("must not be empty after normalization")
+        return endpoint
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPassage:
+    """A pipeline result with skip information used only for progress accounting."""
+
+    passage: AnnotatedPassage
+    skipped: bool = False
+
+
+def cached_early_decision(
+    text: str,
+    _early_decision: dict[str, object],
+    _endpoint: str,
+    _cache_version: int,
+    provider: EarlyDecisionProvider,
+) -> PassageWithEarlyDecision:
+    """Cache decision results independently of gate sampling and annotation."""
+    return provider.decide(RawPassage(text))
 
 
 def cached_annotation(
-    text: str,
+    passage: PassageWithEarlyDecision,
     _annotation: dict[str, object],
     _endpoint: str,
     _cache_version: int,
@@ -56,20 +100,32 @@ def cached_annotation(
     Joblib hashes _annotation, _endpoint, and _cache_version even though the body does
     not use them. The provider is excluded explicitly when configuring the cache.
     """
-    return provider.annotate(RawPassage(text))
+    return provider.annotate(passage)
+
+
+def should_annotate(
+    passage: PassageWithEarlyDecision, p_annotated_anyway: float
+) -> bool:
+    """Always annotate errors and unknowns; sample only known-clean passages."""
+    return (
+        passage.decision is None
+        or passage.decision.contains_spelling_error
+        or p_annotated_anyway == 1.0
+        or (p_annotated_anyway > 0.0 and random.random() < p_annotated_anyway)
+    )
 
 
 def annotate_batches(
     rows: Iterable[Mapping[str, object]],
-    annotate: Callable[[RawPassage], AnnotatedPassage],
+    annotate: Callable[[RawPassage], PreparedPassage],
     *,
     take: int | None,
     shard_size: int,
     workers: int,
-) -> Iterator[list[AnnotatedPassage]]:
+) -> Iterator[list[PreparedPassage]]:
     """Annotate schema-validated rows, retaining partial and failed results."""
 
-    def annotate_row(row: Mapping[str, object]) -> AnnotatedPassage:
+    def annotate_row(row: Mapping[str, object]) -> PreparedPassage:
         return annotate(RawPassage(cast(str, row["text"])))
 
     source = iter(rows)
@@ -121,6 +177,7 @@ def _write_shard(path: Path, passages: Iterable[AnnotatedPassage]) -> None:
 
 def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
     output: Path = args.output
+    decision_endpoint = args.early_decision_endpoint
     config = args.model_dump(mode="json") | {"endpoint": endpoint}
     _prepare_output(output, config)
 
@@ -145,25 +202,54 @@ def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
         raise TypeError("Dataset 'text' feature must be a string")
     memory = Memory(output / ".cache", verbose=0)
     cached = memory.cache(cached_annotation, ignore=["provider"])
+    cached_decide = memory.cache(cached_early_decision, ignore=["provider"])
     annotation = args.annotation.model_dump()
-    written = failed = with_failures = 0
-    with OpenAI(base_url=endpoint, api_key=token) as client:
+    early_decision = args.early_decision.model_dump()
+    written = failed = with_failures = decision_failures = skipped = 0
+    with (
+        OpenAI(base_url=endpoint, api_key=token) as client,
+        OpenAI(base_url=decision_endpoint, api_key=token) as decision_client,
+    ):
         provider = LlmAnnotationProvider(
             client=client,
             config=args.annotation,
             max_inflight=args.workers,
         )
+        decision_provider = EarlyDecisionProvider(
+            client=decision_client,
+            config=args.early_decision,
+            max_inflight=args.workers,
+        )
 
-        def annotate(passage: RawPassage) -> AnnotatedPassage:
-            return cached(
+        def annotate(passage: RawPassage) -> PreparedPassage:
+            decided = cached_decide(
                 passage.text,
-                annotation,
-                endpoint,
-                ANNOTATION_CACHE_VERSION,
-                provider,
+                early_decision,
+                decision_endpoint,
+                EARLY_DECISION_CACHE_VERSION,
+                decision_provider,
+            )
+            if not should_annotate(decided, args.p_annotated_anyway):
+                return PreparedPassage(
+                    AnnotatedPassage(
+                        decided.text,
+                        [],
+                        decision=decided.decision,
+                        early_decision_failures=decided.failures,
+                    ),
+                    skipped=True,
+                )
+            return PreparedPassage(
+                cached(
+                    decided,
+                    annotation,
+                    endpoint,
+                    ANNOTATION_CACHE_VERSION,
+                    provider,
+                )
             )
 
-        for index, batch in enumerate(
+        for index, results in enumerate(
             annotate_batches(
                 rows,
                 annotate,
@@ -172,27 +258,39 @@ def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
                 workers=args.workers,
             )
         ):
+            batch = [result.passage for result in results]
+            skipped += sum(result.skipped for result in results)
             shard = output / f"part-{index:05d}.jsonl"
             _write_shard(shard, batch)
             batch_failed = sum(passage.annotations is None for passage in batch)
             batch_with_failures = sum(bool(passage.failures) for passage in batch)
+            batch_decision_failures = sum(
+                bool(passage.early_decision_failures) for passage in batch
+            )
             written += len(batch)
             failed += batch_failed
             with_failures += batch_with_failures
+            decision_failures += batch_decision_failures
             logger.info(
-                "Wrote {} ({} usable, {} failed, {} with failure history)",
+                "Wrote {} ({} usable, {} failed, {} with annotation failure history, "
+                "{} with decision failure history; {} skipped annotation so far)",
                 shard.name,
                 len(batch) - batch_failed,
                 batch_failed,
                 batch_with_failures,
+                batch_decision_failures,
+                skipped,
             )
 
     logger.info(
-        "Finished: {} written, {} usable, {} failed, {} with failure history",
+        "Finished: {} written, {} usable, {} failed, {} with annotation failure "
+        "history, {} with decision failure history, {} skipped annotation",
         written,
         written - failed,
         failed,
         with_failures,
+        decision_failures,
+        skipped,
     )
 
 

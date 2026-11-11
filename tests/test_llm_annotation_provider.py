@@ -10,7 +10,44 @@ from speeling_good.preprocessing.llm_annotation_provider import (
     AnnotationConfig,
     LlmAnnotationProvider,
 )
-from speeling_good.preprocessing.types import RawPassage, SpellingAnnotation
+from speeling_good.preprocessing.types import (
+    EarlyDecision,
+    EarlyDecisionFailure,
+    PassageWithEarlyDecision,
+    SpellingAnnotation,
+)
+
+
+@pytest.mark.parametrize("outcome", ["success", "recovery", "partial", "exhaustion"])
+@pytest.mark.parametrize("decision", [None, EarlyDecision(False, 0.83)])
+def test_early_decision_is_preserved_without_influencing_requests(
+    make_provider, outcome, decision
+):
+    calls = []
+    failures = [EarlyDecisionFailure(1, "Invalid JSON", "{")]
+    passage = PassageWithEarlyDecision("teh cat", decision, failures)
+
+    def handler(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if outcome == "exhaustion" or (outcome == "recovery" and len(calls) == 1):
+            return response("{")
+        items = [correction("teh", "the")]
+        if outcome == "partial":
+            items.append(correction("absent", "word"))
+        return response(items)
+
+    result = make_provider(handler, max_attempts=2).annotate(passage)
+    assert result.decision == decision
+    assert result.early_decision_failures == failures
+    assert result.annotations == (
+        None if outcome == "exhaustion" else [SpellingAnnotation("teh", "the", 0, 3)]
+    )
+    assert bool(result.failures) is (outcome != "success")
+    assert all(
+        call["messages"][1] == {"role": "user", "content": passage.text}
+        for call in calls
+    )
 
 
 def correction(original, corrected, before="", after=""):
@@ -86,7 +123,7 @@ def test_exact_context_unicode_and_sorted_spans(make_provider):
             ]
         )
     )
-    result = provider.annotate(RawPassage(text))
+    result = provider.annotate(PassageWithEarlyDecision(text, None))
     assert result.text == text
     assert result.annotations == [
         SpellingAnnotation("teh", "the", 2, 5),
@@ -112,7 +149,9 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
             bad if len(calls) == 1 else [correction("teh", "the", "", " cat")]
         )
 
-    result = make_provider(handler).annotate(RawPassage("teh cat, teh dog"))
+    result = make_provider(handler).annotate(
+        PassageWithEarlyDecision("teh cat, teh dog", None)
+    )
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert len(calls) == 2
     assert "Validation failed" in calls[1]["messages"][-1]["content"]
@@ -145,7 +184,7 @@ def test_custom_prompt_and_sampling_are_preserved_on_retry(
         reasoning_effort=reasoning_effort,
         seed=0,
     )
-    result = provider.annotate(RawPassage("clean text"))
+    result = provider.annotate(PassageWithEarlyDecision("clean text", None))
     assert result.annotations == []
     assert len(calls) == 2
     for call in calls:
@@ -170,7 +209,7 @@ def test_optional_sampling_parameters_are_omitted_by_default(make_provider):
         calls.append(json.loads(request.content))
         return response([])
 
-    make_provider(handler).annotate(RawPassage("clean text"))
+    make_provider(handler).annotate(PassageWithEarlyDecision("clean text", None))
     assert calls[0]["temperature"] == 0
     assert {"top_p", "max_completion_tokens", "seed", "reasoning"}.isdisjoint(calls[0])
 
@@ -182,7 +221,7 @@ def test_output_exhaustion_retains_partial_annotations(make_provider):
         calls.append(request)
         return response([correction("teh", "the"), correction("missing", "word")])
 
-    result = make_provider(handler).annotate(RawPassage("teh cat"))
+    result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
     assert len(calls) == 3
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert [failure.attempt for failure in result.failures] == [1, 2, 3]
@@ -204,7 +243,7 @@ def test_schema_error_feedback_identifies_the_invalid_field(make_provider):
             return response([item])
         return response([correction("teh", "the")])
 
-    result = make_provider(handler).annotate(RawPassage("teh cat"))
+    result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     feedback = calls[1]["messages"][-1]["content"]
     assert "corrections.0.correction" in feedback
@@ -221,7 +260,9 @@ def test_transient_http_failure_recovers(make_provider, status):
             return httpx.Response(status, json={"error": {"message": "try later"}})
         return response([])
 
-    result = make_provider(handler).annotate(RawPassage("PyTorch uses CUDA."))
+    result = make_provider(handler).annotate(
+        PassageWithEarlyDecision("PyTorch uses CUDA.", None)
+    )
     assert result.annotations == []
     assert len(calls) == 2
     assert result.failures == []
@@ -236,7 +277,12 @@ def test_connection_failure_recovers(make_provider):
             raise httpx.ConnectError("unavailable", request=request)
         return response([])
 
-    assert make_provider(handler).annotate(RawPassage("Hello")).annotations == []
+    assert (
+        make_provider(handler)
+        .annotate(PassageWithEarlyDecision("Hello", None))
+        .annotations
+        == []
+    )
     assert len(calls) == 2
 
 
@@ -260,7 +306,7 @@ def test_incomplete_or_refused_response_recovers(make_provider, finish_reason, r
         data["choices"][0]["message"]["refusal"] = refusal
         return httpx.Response(200, json=data)
 
-    result = make_provider(handler).annotate(RawPassage("teh cat"))
+    result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert len(calls) == 2
     assert len(result.failures) == 1
@@ -278,9 +324,11 @@ def test_exhaustion_without_usable_annotations_is_not_a_clean_passage(
     make_provider, bad
 ):
     failed = make_provider(lambda _: response(bad), max_attempts=2).annotate(
-        RawPassage("clean text")
+        PassageWithEarlyDecision("clean text", None)
     )
-    clean = make_provider(lambda _: response([])).annotate(RawPassage("clean text"))
+    clean = make_provider(lambda _: response([])).annotate(
+        PassageWithEarlyDecision("clean text", None)
+    )
     assert failed.annotations is None
     assert [failure.attempt for failure in failed.failures] == [1, 2]
     assert clean.annotations == []
@@ -294,7 +342,7 @@ def test_schema_and_resolution_failures_preserve_valid_entries(make_provider):
         correction("absent", "word"),
     ]
     result = make_provider(lambda _: response(items), max_attempts=1).annotate(
-        RawPassage("teh cat")
+        PassageWithEarlyDecision("teh cat", None)
     )
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert [failure.stage for failure in result.failures] == ["decoding", "resolution"]
@@ -319,7 +367,7 @@ def test_best_partial_attempt_is_selected_without_merging(make_provider, latest_
         ]
     )
     result = make_provider(lambda _: response(next(attempts))).annotate(
-        RawPassage("teh wierd speling")
+        PassageWithEarlyDecision("teh wierd speling", None)
     )
     expected = (
         [
@@ -339,7 +387,7 @@ def test_best_partial_attempt_is_selected_without_merging(make_provider, latest_
 def test_valid_empty_retry_replaces_previous_partial_result(make_provider):
     attempts = iter([[correction("teh", "the"), correction("absent", "word")], []])
     result = make_provider(lambda _: response(next(attempts))).annotate(
-        RawPassage("teh cat")
+        PassageWithEarlyDecision("teh cat", None)
     )
     assert result.annotations == []
     assert len(result.failures) == 1
@@ -356,7 +404,7 @@ def test_missing_response_data_is_retained_as_a_decoding_failure(
         data["choices"][0]["message"]["content"] = None
     result = make_provider(
         lambda _: httpx.Response(200, json=data), max_attempts=1
-    ).annotate(RawPassage("text"))
+    ).annotate(PassageWithEarlyDecision("text", None))
     assert result.annotations is None
     assert len(result.failures) == 1
     assert result.failures[0].stage == "decoding"
@@ -369,7 +417,7 @@ def test_concurrent_passages_keep_failure_histories_separate(make_provider):
         return response([correction(text + " absent", "word")])
 
     provider = make_provider(handler, max_attempts=1)
-    passages = [RawPassage(f"passage {i}") for i in range(8)]
+    passages = [PassageWithEarlyDecision(f"passage {i}", None) for i in range(8)]
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = list(executor.map(provider.annotate, passages))
     for passage, result in zip(passages, results, strict=True):
@@ -403,7 +451,7 @@ def test_retry_after_controls_backoff(
             )
         return response([])
 
-    make_provider(handler).annotate(RawPassage("Hello"))
+    make_provider(handler).annotate(PassageWithEarlyDecision("Hello", None))
     assert delays == [expected_delay]
 
 
@@ -424,7 +472,7 @@ def test_http_failure_preserves_error_and_request_budget(
         return httpx.Response(status, json={"error": {"message": "failed"}})
 
     with pytest.raises(exception):
-        make_provider(handler).annotate(RawPassage("Hello"))
+        make_provider(handler).annotate(PassageWithEarlyDecision("Hello", None))
     assert len(calls) == attempts
 
 
@@ -453,7 +501,7 @@ def test_shared_provider_limits_active_requests_and_keeps_results_separate(
                 active -= 1
 
     provider = make_provider(handler, max_inflight=2)
-    passages = [RawPassage(f"{i}: teh cat") for i in range(8)]
+    passages = [PassageWithEarlyDecision(f"{i}: teh cat", None) for i in range(8)]
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(provider.annotate, passage) for passage in passages]
         try:

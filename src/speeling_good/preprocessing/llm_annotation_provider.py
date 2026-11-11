@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
-    RawPassage,
+    PassageWithEarlyDecision,
     SpellingAnnotation,
 )
 
@@ -258,7 +258,7 @@ class LlmAnnotationProvider:
         self._client = client.with_options(max_retries=0, timeout=config.timeout)
         self._semaphore = BoundedSemaphore(max_inflight)
 
-    def annotate(self, passage: RawPassage) -> AnnotatedPassage:
+    def annotate(self, passage: PassageWithEarlyDecision) -> AnnotatedPassage:
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": self._config.prompt},
             {"role": "user", "content": passage.text},
@@ -274,7 +274,13 @@ class LlmAnnotationProvider:
             result = _evaluate_response(passage.text, completion, attempt + 1)
             failures.extend(result.failures)
             if not result.failures:
-                return AnnotatedPassage(passage.text, result.annotations, failures)
+                return AnnotatedPassage(
+                    passage.text,
+                    result.annotations,
+                    failures,
+                    decision=passage.decision,
+                    early_decision_failures=passage.failures,
+                )
             if result.annotations and (
                 best is None or len(result.annotations) >= len(best)
             ):
@@ -286,7 +292,13 @@ class LlmAnnotationProvider:
                     attempt + 1,
                     len(best or []),
                 )
-                return AnnotatedPassage(passage.text, best, failures)
+                return AnnotatedPassage(
+                    passage.text,
+                    best,
+                    failures,
+                    decision=passage.decision,
+                    early_decision_failures=passage.failures,
+                )
             messages.append(
                 {
                     "role": "user",

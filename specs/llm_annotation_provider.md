@@ -1,5 +1,5 @@
 `LlmAnnotationProvider` is a class that lives in `src/speeling_good/preprocessing/llm_annotation_provider`.
-The goal is to use an LLM to annotate `RawPassages`.
+The goal is to use an LLM to annotate `PassageWithEarlyDecision` inputs.
 
 The important API surface is as follows
 ```python
@@ -8,7 +8,7 @@ class LlmAnnotationProvider:
         self, *, client: OpenAI, config: AnnotationConfig, max_inflight: int = 4
     ): ...
 
-    def annotate(self, passage: RawPassage) -> AnnotatedPassage: ...
+    def annotate(self, passage: PassageWithEarlyDecision) -> AnnotatedPassage: ...
 ```
 
 ## Configuration
@@ -45,6 +45,10 @@ is controlled separately by the constructor argument `max_inflight=4`.
   of inflight requests to a configurable number.
 
 ## Results and failure diagnostics
+
+Every result preserves the input `decision` and copies its diagnostics to
+`early_decision_failures`, including partial and exhausted annotation results. Only
+passage text is sent to the model; early judgments do not influence its prompt.
 
 `AnnotatedPassage.failures` defaults to an empty list. Each `AnnotationFailure`
 contains the 1-based request attempt, stage (`decoding` or `resolution`), diagnostic

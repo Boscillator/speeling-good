@@ -61,8 +61,14 @@ class AnnotationFailure:
 
 @dataclass(frozen=True, slots=True)
 class AnnotatedPassage:
-    """Annotations may be partial; None means no usable result was obtained."""
+    """Retain the decision and diagnostics alongside full or partial annotations.
+
+    None means no usable annotation result; an empty list also covers clean
+    passages whose full annotation was skipped by the preparation pipeline.
+    """
 
     text: str
     annotations: list[SpellingAnnotation] | None
     failures: list[AnnotationFailure] = field(default_factory=list)
+    decision: EarlyDecision | None = None
+    early_decision_failures: list[EarlyDecisionFailure] = field(default_factory=list)

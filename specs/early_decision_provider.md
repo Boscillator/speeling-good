@@ -1,5 +1,5 @@
 `EarlyDecisionProvider` uses a decision model to quickly and cheaply evaluate whether
-a passage contains any spelling errors. It is independent of the preparation pipeline.
+a passage contains any spelling errors. The preparation pipeline uses it as a gate before full annotation.
 
 The important api surface is:
 
@@ -51,7 +51,7 @@ The constructor separately requires a positive integer `max_inflight=4`.
   A valid clean result has `contains_spelling_error=False`; it differs from unknown.
 - Each call owns its failure history. A shared provider supports multiple threads;
   only active HTTP calls occupy semaphore slots, not validation or backoff.
-- No caching, CLI wiring, or pipeline integration is included.
+- Caching and gate sampling belong to the preparation CLI, not this provider.
 
 ## API references
 
