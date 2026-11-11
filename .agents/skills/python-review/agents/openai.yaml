@@ -1,0 +1,3 @@
+interface:
+  display_name: "Python Review"
+  short_description: "Review Python using learned human preferences"

@@ -23,3 +23,41 @@ On NixOS, uv-installed executables such as Ruff and ty also require `nix-ld`.
 Enable `programs.nix-ld.enable = true;` in the NixOS configuration and rebuild
 the system, then reload the development shell. The shell sets `NIX_LD` and the
 library path for these executables.
+
+## LLM spelling annotations
+
+`LlmAnnotationProvider` accepts a synchronous OpenAI client and can be shared by
+multiple Python threads. Configure the client's API base URL, including `/v1` for
+LM Studio. The caller owns and closes the client.
+
+```python
+import os
+
+from openai import OpenAI
+
+from speeling_good.preprocessing.llm_annotation_provider import LlmAnnotationProvider
+from speeling_good.preprocessing.types import RawPassage
+
+with OpenAI(
+    base_url=os.environ["MODEL_ENDPOINT"].rstrip("/") + "/v1",
+    api_key=os.environ["MODEL_TOKEN"],
+) as client:
+    provider = LlmAnnotationProvider(client=client, model="qwen/3.8-27b")
+    result = provider.annotate(RawPassage("I recieved the package."))
+    print(result.annotations)
+```
+
+This example assumes `MODEL_ENDPOINT` is the server root; omit the appended `/v1`
+if your endpoint already includes it. Each annotation has the original text,
+corrected spelling, and half-open Python string offsets into the unchanged passage.
+Exact surrounding context must locate a unique span; ambiguous, missing,
+duplicate, and overlapping corrections invalidate the entire response.
+
+Defaults are four active requests per provider, three total attempts, and a
+120-second timeout per request. Invalid output retries with validation feedback.
+Connection errors, timeouts, HTTP 408/409/429, and 5xx responses retry with jittered
+exponential backoff starting at one second and capped at eight seconds;
+`Retry-After` takes precedence and is capped at 30 seconds. Other HTTP errors fail
+immediately. SDK retries are disabled on a client copy. Exhausted invalid output
+raises `AnnotationError`; exhausted transport failures preserve the SDK exception.
+Backoff does not occupy a request slot. There is no caching or async interface.
