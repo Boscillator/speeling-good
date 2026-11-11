@@ -7,7 +7,6 @@ import pytest
 from openai import AuthenticationError, OpenAI, RateLimitError
 
 from speeling_good.preprocessing.llm_annotation_provider import (
-    AnnotationError,
     LlmAnnotationProvider,
 )
 from speeling_good.preprocessing.types import RawPassage, SpellingAnnotation
@@ -90,15 +89,9 @@ def test_exact_context_unicode_and_sorted_spans(make_provider):
 @pytest.mark.parametrize(
     "bad",
     [
-        [correction("teh", "the")],  # Repeated without enough context.
-        [correction("teh", "the", "invented context")],
-        [correction("teh", "the", "", " cat"), correction("teh cat", "the cat")],
-        [correction("teh", "the", "", " cat")] * 2,
-        [correction("teh", "teh", "", " cat")],
-        [correction("", "the")],
-        [correction("teh", "", "", " cat")],
-        '{"corrections": [',
-        {"unexpected": "schema"},
+        [correction("teh", "the")],  # Resolution failure: ambiguous context.
+        '{"corrections": [',  # JSON decoding failure.
+        {"unexpected": "schema"},  # Schema validation failure.
     ],
 )
 def test_invalid_output_recovers_with_feedback(make_provider, bad):
@@ -114,19 +107,30 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert len(calls) == 2
     assert "Validation failed" in calls[1]["messages"][-1]["content"]
+    assert result.failures
+    assert all(failure.attempt == 1 for failure in result.failures)
+    assert all(
+        failure.response == response(bad).json()["choices"][0]["message"]["content"]
+        for failure in result.failures
+    )
 
 
-def test_output_exhaustion_does_not_return_partial_annotations(make_provider):
+def test_output_exhaustion_retains_partial_annotations(make_provider):
     calls = []
 
     def handler(request):
         calls.append(request)
         return response([correction("teh", "the"), correction("missing", "word")])
 
-    with pytest.raises(AnnotationError) as error:
-        make_provider(handler).annotate(RawPassage("teh cat"))
+    result = make_provider(handler).annotate(RawPassage("teh cat"))
     assert len(calls) == 3
-    assert isinstance(error.value.__cause__, AnnotationError)
+    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert [failure.attempt for failure in result.failures] == [1, 2, 3]
+    assert all(failure.stage == "resolution" for failure in result.failures)
+    assert all(
+        "corrections.1" in failure.error and "missing" in failure.error
+        for failure in result.failures
+    )
 
 
 def test_schema_error_feedback_identifies_the_invalid_field(make_provider):
@@ -160,6 +164,7 @@ def test_transient_http_failure_recovers(make_provider, status):
     result = make_provider(handler).annotate(RawPassage("PyTorch uses CUDA."))
     assert result.annotations == []
     assert len(calls) == 2
+    assert result.failures == []
 
 
 def test_connection_failure_recovers(make_provider):
@@ -198,6 +203,124 @@ def test_incomplete_or_refused_response_recovers(make_provider, finish_reason, r
     result = make_provider(handler).annotate(RawPassage("teh cat"))
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert len(calls) == 2
+    assert len(result.failures) == 1
+    failure = result.failures[0]
+    assert failure.stage == "decoding"
+    assert failure.response == '{"corrections": []}'
+    assert (refusal or finish_reason) in failure.error
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ['{"corrections": [', {"unexpected": "schema"}, [correction("missing", "word")]],
+)
+def test_exhaustion_without_usable_annotations_is_not_a_clean_passage(
+    make_provider, bad
+):
+    failed = make_provider(lambda _: response(bad), max_attempts=2).annotate(
+        RawPassage("clean text")
+    )
+    clean = make_provider(lambda _: response([])).annotate(RawPassage("clean text"))
+    assert failed.annotations is None
+    assert [failure.attempt for failure in failed.failures] == [1, 2]
+    assert clean.annotations == []
+    assert clean.failures == []
+
+
+def test_schema_and_resolution_failures_preserve_valid_entries(make_provider):
+    items = [
+        correction("teh", "the"),
+        {"original": "bad", "before": "", "after": ""},
+        correction("absent", "word"),
+    ]
+    result = make_provider(lambda _: response(items), max_attempts=1).annotate(
+        RawPassage("teh cat")
+    )
+    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert [failure.stage for failure in result.failures] == ["decoding", "resolution"]
+    assert "corrections.1" in result.failures[0].error
+    assert "corrections.2" in result.failures[1].error
+
+
+@pytest.mark.parametrize("latest_count", [1, 2])
+def test_best_partial_attempt_is_selected_without_merging(make_provider, latest_count):
+    attempts = iter(
+        [
+            [
+                correction("teh", "the"),
+                correction("wierd", "weird"),
+                correction("absent", "word"),
+            ],
+            [correction("speling", "spelling"), correction("wierd", "weird")][
+                :latest_count
+            ]
+            + [correction("absent", "word")],
+            '{"corrections": [',
+        ]
+    )
+    result = make_provider(lambda _: response(next(attempts))).annotate(
+        RawPassage("teh wierd speling")
+    )
+    expected = (
+        [
+            SpellingAnnotation("teh", "the", 0, 3),
+            SpellingAnnotation("wierd", "weird", 4, 9),
+        ]
+        if latest_count == 1
+        else [
+            SpellingAnnotation("wierd", "weird", 4, 9),
+            SpellingAnnotation("speling", "spelling", 10, 17),
+        ]
+    )
+    assert result.annotations == expected
+    assert [failure.attempt for failure in result.failures] == [1, 2, 3]
+
+
+def test_valid_empty_retry_replaces_previous_partial_result(make_provider):
+    attempts = iter([[correction("teh", "the"), correction("absent", "word")], []])
+    result = make_provider(lambda _: response(next(attempts))).annotate(
+        RawPassage("teh cat")
+    )
+    assert result.annotations == []
+    assert len(result.failures) == 1
+
+
+@pytest.mark.parametrize("missing", ["choices", "content"])
+def test_missing_response_data_is_retained_as_a_decoding_failure(
+    make_provider, missing
+):
+    data = response([]).json()
+    if missing == "choices":
+        data["choices"] = []
+    else:
+        data["choices"][0]["message"]["content"] = None
+    result = make_provider(
+        lambda _: httpx.Response(200, json=data), max_attempts=1
+    ).annotate(RawPassage("text"))
+    assert result.annotations is None
+    assert len(result.failures) == 1
+    assert result.failures[0].stage == "decoding"
+    assert result.failures[0].response is None
+
+
+def test_concurrent_passages_keep_failure_histories_separate(make_provider):
+    def handler(request):
+        text = json.loads(request.content)["messages"][1]["content"]
+        return response([correction(text + " absent", "word")])
+
+    provider = make_provider(handler, max_attempts=1)
+    passages = [RawPassage(f"passage {i}") for i in range(8)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(provider.annotate, passages))
+    for passage, result in zip(passages, results, strict=True):
+        assert result.annotations is None
+        assert len(result.failures) == 1
+        failure = result.failures[0]
+        assert passage.text + " absent" in failure.error
+        assert (
+            json.loads(failure.response)["corrections"][0]["original"]
+            == passage.text + " absent"
+        )
 
 
 @pytest.mark.parametrize("retry_after,expected_delay", [("2", 2.0), ("90", 30.0)])

@@ -21,8 +21,8 @@ findings are valid even when behavior is correct; label them accordingly rather
 than inventing a runtime failure. Avoid speculative findings and cosmetic churn.
 
 A review request calls for findings and suggested fixes. When asked to implement
-fixes, make them, preserve intended behavior and public contracts unless a change
-is requested, and run relevant checks. Report the result and any unverified parts.
+fixes, make them, preserve intended behavior and required public contracts, and
+run relevant checks. Report the result and any unverified parts.
 
 ## Learned preferences
 
@@ -35,6 +35,18 @@ contract reduce cognitive load; avoid arbitrary line limits, one-line wrappers,
 or a framework of tiny helpers that makes readers chase the implementation.
 Keep per-call state local and preserve concurrency and retry semantics when
 refactoring those concerns.
+
+Separate per-item validation or matching from collection-level conflict handling,
+and response validation from decoding and result assembly, when those concerns
+obscure the overall flow. Prefer explicit local results over helpers that mutate
+captured output state.
+
+### Retain functionality for actual callers
+
+Check production callers before preserving an API or compatibility wrapper. In a
+greenfield application, remove unused functionality and adapt or remove tests
+that exist only to exercise it; tests alone do not justify retaining a feature.
+Keep compatibility only when real consumers or explicit requirements need it.
 
 ### Prefer explicit code over artificial uniformity
 

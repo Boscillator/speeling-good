@@ -22,3 +22,7 @@ and keeping track of progress without spamming the console during non-error cond
 Use the readme for quick descriptions of the overall project and commmand references.
 Most sessions should require zero changes to the README.
 
+MODEL_ENDPOINT and MODEL_TOKEN enviroment variables include the information you need to
+test against a live LLM server (either a local LM Studio with qwen/qwen3.8-27b or
+OpenRouter depending on my current needs)
+

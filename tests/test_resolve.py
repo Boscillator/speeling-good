@@ -1,10 +1,8 @@
 import pytest
 
 from speeling_good.preprocessing.llm_annotation_provider import (
-    AnnotationError,
     Correction,
-    Corrections,
-    resolve,
+    resolve_partial,
 )
 from speeling_good.preprocessing.types import SpellingAnnotation
 
@@ -75,55 +73,31 @@ from speeling_good.preprocessing.types import SpellingAnnotation
     ],
 )
 def test_resolve_spans(text, corrections, expected):
-    proposals = Corrections(corrections=corrections)
-    original_proposals = proposals.model_copy(deep=True)
-
-    result = resolve(text, proposals)
+    originals = [item.model_copy(deep=True) for item in corrections]
+    result, errors = resolve_partial(text, list(enumerate(corrections)))
 
     assert result == expected
+    assert errors == []
     assert all(
         text[item.span_start : item.span_end] == item.original for item in result
     )
-    assert proposals == original_proposals
+    assert corrections == originals
 
 
 @pytest.mark.parametrize(
-    "text,corrections",
+    "text,corrections,expected",
     [
-        pytest.param(
-            "teh cat, teh dog",
-            [Correction(original="teh", correction="the", before="", after="")],
-            id="ambiguous-original",
-        ),
         pytest.param(
             "aaa",
             [Correction(original="aa", correction="a", before="", after="")],
+            [],
             id="overlapping-context-occurrences-are-ambiguous",
-        ),
-        pytest.param(
-            "teh cat",
-            [Correction(original="teh", correction="the", before="", after=" dog")],
-            id="missing-context",
         ),
         pytest.param(
             "teh\tcat",
             [Correction(original="teh", correction="the", before="", after=" cat")],
+            [],
             id="context-whitespace-must-match-exactly",
-        ),
-        pytest.param(
-            "teh cat",
-            [Correction(original="", correction="the", before="", after="teh cat")],
-            id="empty-original",
-        ),
-        pytest.param(
-            "teh cat",
-            [Correction(original="teh", correction="", before="", after="")],
-            id="empty-correction",
-        ),
-        pytest.param(
-            "teh cat",
-            [Correction(original="teh", correction="teh", before="", after="")],
-            id="unchanged-correction",
         ),
         pytest.param(
             "teh cat",
@@ -131,17 +105,8 @@ def test_resolve_spans(text, corrections, expected):
                 Correction(original="teh", correction="the", before="", after=""),
                 Correction(original="teh", correction="the", before="", after=" cat"),
             ],
+            [],
             id="duplicate-span-with-different-context",
-        ),
-        pytest.param(
-            "teh cat",
-            [
-                Correction(original="teh", correction="the", before="", after=""),
-                Correction(
-                    original="teh cat", correction="the cat", before="", after=""
-                ),
-            ],
-            id="overlapping-spans",
         ),
         pytest.param(
             "teh cat",
@@ -149,10 +114,88 @@ def test_resolve_spans(text, corrections, expected):
                 Correction(original="teh", correction="the", before="", after=""),
                 Correction(original="missing", correction="word", before="", after=""),
             ],
-            id="invalid-correction-rejects-entire-batch",
+            [SpellingAnnotation("teh", "the", 0, 3)],
+            id="invalid-correction-preserves-unrelated-edit",
         ),
     ],
 )
-def test_resolve_rejects_invalid_corrections(text, corrections):
-    with pytest.raises(AnnotationError):
-        resolve(text, Corrections(corrections=corrections))
+def test_partial_resolution_handles_invalid_context_and_spans(
+    text, corrections, expected
+):
+    annotations, errors = resolve_partial(text, list(enumerate(corrections)))
+
+    assert annotations == expected
+    assert errors
+
+
+def correction(original, corrected, before="", after=""):
+    return Correction(
+        original=original, correction=corrected, before=before, after=after
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid,reason",
+    [
+        pytest.param([correction("teh", "the")], "ambiguous", id="ambiguous"),
+        pytest.param([correction("missing", "word")], "missing", id="missing"),
+        pytest.param([correction("teh", "teh")], "unchanged", id="unchanged"),
+        pytest.param([correction("", "word")], "nonempty", id="empty-original"),
+        pytest.param([correction("teh", "")], "nonempty", id="empty-correction"),
+        pytest.param(
+            [correction("teh", "the", after=" cat")] * 2,
+            "duplicate",
+            id="duplicate-span",
+        ),
+        pytest.param(
+            [correction("teh", "the", after=" cat"), correction("teh cat", "the cat")],
+            "overlapping",
+            id="overlapping-spans",
+        ),
+    ],
+)
+def test_partial_resolution_preserves_unrelated_corrections(invalid, reason):
+    corrections = invalid + [correction("wierd", "weird")]
+    originals = [item.model_copy(deep=True) for item in corrections]
+
+    annotations, errors = resolve_partial(
+        "teh cat, teh dog, wierd", list(enumerate(corrections))
+    )
+
+    assert annotations == [SpellingAnnotation("wierd", "weird", 18, 23)]
+    assert errors
+    assert reason in errors[0]
+    assert "corrections.0" in errors[0]
+    if reason in ("duplicate", "overlapping"):
+        assert "corrections.1" in errors[0]
+    assert corrections == originals
+
+
+def test_partial_resolution_excludes_every_correction_in_a_containing_span():
+    corrections = [
+        correction("teh cat", "the cat"),
+        correction("teh", "the"),
+        correction("cat", "cats"),
+        correction("wierd", "weird"),
+    ]
+
+    annotations, errors = resolve_partial("teh cat wierd", list(enumerate(corrections)))
+
+    assert annotations == [SpellingAnnotation("wierd", "weird", 8, 13)]
+    assert any(
+        "corrections.0" in error and "corrections.1" in error for error in errors
+    )
+    assert any(
+        "corrections.0" in error and "corrections.2" in error for error in errors
+    )
+
+
+def test_partial_resolution_preserves_original_response_indices():
+    annotations, errors = resolve_partial(
+        "teh cat",
+        [(2, correction("teh", "the")), (5, correction("absent", "word"))],
+    )
+
+    assert annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert len(errors) == 1
+    assert "corrections.5" in errors[0]

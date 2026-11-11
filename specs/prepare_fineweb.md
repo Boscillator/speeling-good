@@ -30,14 +30,17 @@ active model requests. Results retain input order, and only one batch is held in
 memory at a time.
 
 Write one `part-00000.jsonl`, `part-00001.jsonl`, etc. per input batch. Each line
-contains `text` and `annotations`; each annotation contains `original`,
+contains `text`, `annotations`, and `failures`; each annotation contains `original`,
 `corrected`, `span_start`, and `span_end` using half-open Python string offsets.
-Keep passages with no spelling mistakes. Exclude passages for which the provider
-exhausts its validation retries (`AnnotationError`); an entirely excluded batch
-produces an empty shard. Other errors stop processing with a nonzero exit status.
+Keep passages with no spelling mistakes, partial annotations, and exhausted output
+failures. `annotations: null` indicates no usable result, while `annotations: []`
+indicates a successful response with no mistakes. Failure records retain attempt
+numbers, decoding/resolution stages, errors, and raw response content. Transport
+and other unexpected errors stop processing with a nonzero exit status.
 
 Write resolved CLI options and the normalized endpoint to `config.yaml` beside
-the shards. Log per-shard progress and final attempted/written/skipped counts.
+the shards. Log per-shard and final counts of written passages, usable results,
+failed results, and passages with failure history (including recovered results).
 Each completed file replaces its destination atomically. Every invocation requires
 a new output directory; an existing directory raises `FileExistsError` before
 loading data. An interrupted run may leave completed shards and requires a new
@@ -48,13 +51,14 @@ stopping Parquet streams early (huggingface/datasets#8793).
 
 ## Caching
 
-Joblib `Memory` stores successful annotations under `<output>/.cache`, keyed by
+Joblib `Memory` stores returned annotation results under `<output>/.cache`, keyed by
 passage text, model, normalized endpoint, and an explicit annotation-cache version.
 Provider objects, clients, and credentials are excluded from cache identity.
-Validation failures are not cached. Bump the cache version when annotation
+Partial and failed output results are cached with their diagnostics; raised errors
+are not cached. Bump the cache version when annotation
 prompts, resolution rules, or output types change. Replacing model weights behind
 the same endpoint/model identifier requires removing the cache or choosing a new
 output directory.
 
-Repeated passages within a run reuse successful annotations. Cache artifacts are
+Repeated passages within a run reuse cached results. Cache artifacts are
 retained in the output directory, but the command does not resume existing runs.

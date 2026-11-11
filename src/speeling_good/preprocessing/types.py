@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -24,6 +24,19 @@ class SpellingAnnotation:
 
 
 @dataclass(frozen=True, slots=True)
+class AnnotationFailure:
+    """An invalid model response; attempt numbers start at one."""
+
+    attempt: int
+    stage: Literal["decoding", "resolution"]
+    error: str
+    response: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class AnnotatedPassage:
+    """Annotations may be partial; None means no usable result was obtained."""
+
     text: str
-    annotations: list[SpellingAnnotation]
+    annotations: list[SpellingAnnotation] | None
+    failures: list[AnnotationFailure] = field(default_factory=list)

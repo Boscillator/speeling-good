@@ -18,13 +18,12 @@ from loguru import logger
 from openai import OpenAI
 
 from speeling_good.preprocessing.llm_annotation_provider import (
-    AnnotationError,
     LlmAnnotationProvider,
 )
 from speeling_good.preprocessing.types import AnnotatedPassage, RawPassage
 
 # Bump when annotation prompts, resolution rules, or output types change.
-ANNOTATION_CACHE_VERSION = 1
+ANNOTATION_CACHE_VERSION = 2
 
 
 def positive_int(value: str) -> int:
@@ -60,17 +59,11 @@ def annotate_batches(
     take: int | None,
     shard_size: int,
     workers: int,
-) -> Iterator[list[AnnotatedPassage | None]]:
-    """Annotate schema-validated rows; failed validation occupies a skipped slot."""
+) -> Iterator[list[AnnotatedPassage]]:
+    """Annotate schema-validated rows, retaining partial and failed results."""
 
-    def annotate_row(row: Mapping[str, object]) -> AnnotatedPassage | None:
-        try:
-            return annotate(RawPassage(cast(str, row["text"])))
-        except AnnotationError as error:
-            logger.warning(
-                "Skipping passage after annotation validation failed: {}", error
-            )
-            return None
+    def annotate_row(row: Mapping[str, object]) -> AnnotatedPassage:
+        return annotate(RawPassage(cast(str, row["text"])))
 
     source = iter(rows)
     try:
@@ -142,7 +135,7 @@ def prepare(args: argparse.Namespace, endpoint: str, token: str) -> None:
         raise TypeError("Dataset 'text' feature must be a string")
     memory = Memory(output / ".cache", verbose=0)
     cached = memory.cache(cached_annotation, ignore=["provider"])
-    attempted = written = skipped = 0
+    written = failed = with_failures = 0
     with OpenAI(base_url=endpoint, api_key=token) as client:
         provider = LlmAnnotationProvider(
             client=client,
@@ -169,20 +162,26 @@ def prepare(args: argparse.Namespace, endpoint: str, token: str) -> None:
             )
         ):
             shard = output / f"part-{index:05d}.jsonl"
-            valid = [passage for passage in batch if passage is not None]
-            _write_shard(shard, valid)
-            attempted += len(batch)
-            written += len(valid)
-            skipped += len(batch) - len(valid)
+            _write_shard(shard, batch)
+            batch_failed = sum(passage.annotations is None for passage in batch)
+            batch_with_failures = sum(bool(passage.failures) for passage in batch)
+            written += len(batch)
+            failed += batch_failed
+            with_failures += batch_with_failures
             logger.info(
-                "Wrote {} ({} valid, {} skipped)",
+                "Wrote {} ({} usable, {} failed, {} with failure history)",
                 shard.name,
-                len(valid),
-                len(batch) - len(valid),
+                len(batch) - batch_failed,
+                batch_failed,
+                batch_with_failures,
             )
 
     logger.info(
-        "Finished: {} attempted, {} written, {} skipped", attempted, written, skipped
+        "Finished: {} written, {} usable, {} failed, {} with failure history",
+        written,
+        written - failed,
+        failed,
+        with_failures,
     )
 
 

@@ -3,12 +3,16 @@ from threading import Event
 import pytest
 
 from speeling_good.cli.prepare_fineweb import annotate_batches
-from speeling_good.preprocessing.llm_annotation_provider import AnnotationError
-from speeling_good.preprocessing.types import AnnotatedPassage
+from speeling_good.preprocessing.types import (
+    AnnotatedPassage,
+    AnnotationFailure,
+    SpellingAnnotation,
+)
 
 
 def test_batches_are_bounded_and_count_failed_inputs_toward_take():
     consumed = []
+    failure = AnnotationFailure(1, "decoding", "Invalid JSON", "{")
 
     def rows():
         for text in ("first", "invalid", "third", "fourth", "unrequested"):
@@ -17,15 +21,27 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
 
     def annotate(passage):
         if passage.text == "invalid":
-            raise AnnotationError("invalid model output")
+            return AnnotatedPassage(passage.text, None, [failure])
+        if passage.text == "third":
+            return AnnotatedPassage(
+                passage.text, [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+            )
         return AnnotatedPassage(passage.text, [])
 
     batches = annotate_batches(rows(), annotate, take=4, shard_size=2, workers=2)
     first = next(batches)
     assert consumed == ["first", "invalid"]
-    assert first == [AnnotatedPassage("first", []), None]
+    assert first == [
+        AnnotatedPassage("first", []),
+        AnnotatedPassage("invalid", None, [failure]),
+    ]
     assert list(batches) == [
-        [AnnotatedPassage("third", []), AnnotatedPassage("fourth", [])]
+        [
+            AnnotatedPassage(
+                "third", [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+            ),
+            AnnotatedPassage("fourth", []),
+        ]
     ]
     assert consumed == ["first", "invalid", "third", "fourth"]
 
