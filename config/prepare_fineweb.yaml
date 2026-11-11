@@ -13,6 +13,8 @@ output: data/fineweb
 workers: 2
 shard_size: 10
 p_annotated_anyway: 1.0
+# Send every passage directly to annotation without decision requests or caching.
+skip_early_decision: true
 early_decision_endpoint: https://openrouter.ai/api/alpha
 
 early_decision:

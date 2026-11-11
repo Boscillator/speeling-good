@@ -11,6 +11,7 @@ Edit the default YAML or supply overrides using `key=value` syntax:
 ```sh
 uv run prepare-fineweb take=20 output=data/experiment-1 annotation.temperature=0.5
 uv run prepare-fineweb take=null annotation.model=other-model output=data/experiment-2
+uv run prepare-fineweb skip_early_decision=true output=data/annotation-only
 uv run prepare-fineweb --cfg job --resolve
 uv run prepare-fineweb --config-dir=/absolute/path/to/configs --config-name=experiment
 ```
@@ -35,6 +36,10 @@ Top-level settings use these defaults:
 - `p_annotated_anyway`: `1.0`, a finite probability in `[0, 1]` for fully annotating
   passages classified as clean. Errors and unknown decisions always receive full annotation.
 - `early_decision_endpoint`: `https://openrouter.ai/api/alpha`, using `MODEL_TOKEN`.
+- `skip_early_decision`: `false`. Set to `true` to bypass the decision client,
+  provider, cache, and sampling gate. Every passage receives full annotation,
+  regardless of `p_annotated_anyway`, with `decision: null` and empty
+  `early_decision_failures`.
 
 The `early_decision` section uses `EarlyDecisionConfig`: `model` defaults to
 `typesafe/jev-1.13`, `max_attempts` to `3`, and `timeout` to `120.0`. Its spelling-only

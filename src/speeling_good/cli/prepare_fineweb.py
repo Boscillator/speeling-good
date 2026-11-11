@@ -5,7 +5,7 @@ import os
 import random
 import sys
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from itertools import islice
 from pathlib import Path
@@ -56,6 +56,7 @@ class PrepareConfig(BaseModel):
     p_annotated_anyway: Annotated[
         float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)
     ] = 1.0
+    skip_early_decision: Annotated[bool, Field(strict=True)] = False
     early_decision_endpoint: Annotated[str, Field(min_length=1)] = (
         "https://openrouter.ai/api/alpha"
     )
@@ -228,45 +229,52 @@ def _run_pipeline(
         raise TypeError("Dataset 'text' feature must be a string")
     memory = Memory(output / ".cache", verbose=0)
     cached = memory.cache(cached_annotation, ignore=["provider"])
-    cached_decide = memory.cache(cached_early_decision, ignore=["provider"])
     annotation = args.annotation.model_dump()
-    early_decision = args.early_decision.model_dump()
     written = failed = with_failures = decision_failures = skipped = 0
-    with (
-        OpenAI(base_url=endpoint, api_key=token) as client,
-        OpenAI(base_url=decision_endpoint, api_key=token) as decision_client,
-    ):
+    with ExitStack() as stack:
+        client = stack.enter_context(OpenAI(base_url=endpoint, api_key=token))
         provider = LlmAnnotationProvider(
             client=client,
             config=args.annotation,
             max_inflight=args.workers,
             usage=usage,
         )
-        decision_provider = EarlyDecisionProvider(
-            client=decision_client,
-            config=args.early_decision,
-            max_inflight=args.workers,
-            usage=usage,
-        )
+        decision_provider = None
+        if args.skip_early_decision:
+            logger.info("Early decision disabled; annotating every passage")
+        else:
+            decision_client = stack.enter_context(
+                OpenAI(base_url=decision_endpoint, api_key=token)
+            )
+            decision_provider = EarlyDecisionProvider(
+                client=decision_client,
+                config=args.early_decision,
+                max_inflight=args.workers,
+                usage=usage,
+            )
+            cached_decide = memory.cache(cached_early_decision, ignore=["provider"])
+            early_decision = args.early_decision.model_dump()
 
         def annotate(passage: RawPassage) -> PreparedPassage:
-            decided = cached_decide(
-                passage.text,
-                early_decision,
-                decision_endpoint,
-                EARLY_DECISION_CACHE_VERSION,
-                decision_provider,
-            )
-            if not should_annotate(decided, args.p_annotated_anyway):
-                return PreparedPassage(
-                    AnnotatedPassage(
-                        decided.text,
-                        [],
-                        decision=decided.decision,
-                        early_decision_failures=decided.failures,
-                    ),
-                    skipped=True,
+            decided = PassageWithEarlyDecision(passage.text, None)
+            if decision_provider is not None:
+                decided = cached_decide(
+                    passage.text,
+                    early_decision,
+                    decision_endpoint,
+                    EARLY_DECISION_CACHE_VERSION,
+                    decision_provider,
                 )
+                if not should_annotate(decided, args.p_annotated_anyway):
+                    return PreparedPassage(
+                        AnnotatedPassage(
+                            decided.text,
+                            [],
+                            decision=decided.decision,
+                            early_decision_failures=decided.failures,
+                        ),
+                        skipped=True,
+                    )
             return PreparedPassage(
                 cached(
                     decided,
