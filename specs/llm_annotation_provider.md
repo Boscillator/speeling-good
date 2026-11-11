@@ -1,31 +1,46 @@
 `LlmAnnotationProvider` is a class that lives in `src/speeling_good/preprocessing/llm_annotation_provider`.
-The goal is to use an LLM to annotated `RawPassages`.
+The goal is to use an LLM to annotate `RawPassages`.
 
-The important API surfaces is as follows
+The important API surface is as follows
 ```python
 class LlmAnnotationProvider:
-  
-  def __init__(self, *,
-    client: OpenAI, # or OpenAIAsync
-    other_config_as_needed...): ...
+    def __init__(
+        self, *, client: OpenAI, config: AnnotationConfig, max_inflight: int = 4
+    ): ...
 
-  def annotate(self, passage: RawPassage) -> AnnotatedPassage: ...
+    def annotate(self, passage: RawPassage) -> AnnotatedPassage: ...
 ```
 
-## Behaviour
-- The class calls out to an open-ai compatible LLM endpoint via the `openai` library.
-- It asks the LLM to identify all spelling mistakes in the provided passage.
-- It uses structured generation with pydanic models to constrain the output.
-- The output should have the following fields per correction: `original`, `correction`, `before`, `after`.
-- The model should be prompted to correct spelling mistakes only, not grammer mistakes. Furthermore,
-  correctly spelled proper nouns, techical terms, etc, are not spelling mistakes.
-- The client should use the context return to find the actual span in the passage.
+## Configuration
 
-## Retries, caching and parrallelism
+The constructor requires `client` and a validated `config: AnnotationConfig`.
+The config requires `model` and `prompt`. The CLI's default system prompt is
+defined in the repository’s `config/prepare_fineweb.yaml`; other callers supply their
+own prompt or load that configuration. The provider retains the supplied config
+without serializing or validating it again.
+
+Optional config fields are `temperature=0.0`, `top_p=None`,
+`max_completion_tokens=None`, `seed=None`, `max_attempts=3`, and
+`timeout=120.0`. Sampling controls apply to every request, including retries; null
+optional controls are omitted from the request. Structured output remains fixed.
+`AnnotationConfig` validates nonempty model/prompt, finite sampling ranges and
+positive timeout, completion-token limit, and attempt budget. Request concurrency
+is controlled separately by the constructor argument `max_inflight=4`.
+
+## Behaviour
+- The class calls out to an OpenAI compatible LLM endpoint via the `openai` library.
+- It asks the LLM to identify all spelling mistakes in the provided passage.
+- It uses structured generation with Pydantic models to constrain the output.
+- The output should have the following fields per correction: `original`, `correction`, `before`, `after`.
+- The model should be prompted to correct spelling mistakes only, not grammar mistakes. Furthermore,
+  correctly spelled proper nouns, technical terms, etc, are not spelling mistakes.
+- The client should use the context returned to find the actual span in the passage.
+
+## Retries, caching and parallelism
 - The client retries invalid output and transient connection/HTTP failures within
   `max_attempts`, including the initial request. Invalid output receives validation
   feedback. Other HTTP errors fail immediately; transport exhaustion still raises.
-- Caching is defered for now.
+- Caching belongs to the preparation CLI; the provider does not cache results.
 - The client should expect to be called from multiple python threads. Furthermore, it should limit the number
   of inflight requests to a configurable number.
 

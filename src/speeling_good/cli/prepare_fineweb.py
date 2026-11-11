@@ -1,6 +1,5 @@
 """Stream FineWeb into cached, annotated JSONL shards."""
 
-import argparse
 import json
 import os
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
@@ -9,44 +8,52 @@ from dataclasses import asdict
 from itertools import islice
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import IO, cast
+from typing import IO, Annotated, cast
 
+import hydra
 import yaml
 from datasets import Value, load_dataset
 from joblib import Memory, Parallel, delayed
 from loguru import logger
+from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field
 
 from speeling_good.preprocessing.llm_annotation_provider import (
+    AnnotationConfig,
     LlmAnnotationProvider,
 )
 from speeling_good.preprocessing.types import AnnotatedPassage, RawPassage
 
-# Bump when annotation prompts, resolution rules, or output types change.
+# Bump when resolution rules or output types change; prompts are hashed directly.
 ANNOTATION_CACHE_VERSION = 2
 
 
-def positive_int(value: str) -> int:
-    number = int(value)
-    if number < 1:
-        raise argparse.ArgumentTypeError("must be a positive integer")
-    return number
+class PrepareConfig(BaseModel):
+    """Validate run settings before creating output or opening external services."""
 
+    model_config = ConfigDict(extra="forbid")
 
-def take_count(value: str) -> int | None:
-    return None if value == "all" else positive_int(value)
+    dataset: str
+    subset: str
+    split: str
+    take: Annotated[int, Field(strict=True, gt=0)] | None
+    output: Path
+    workers: Annotated[int, Field(strict=True, gt=0)]
+    shard_size: Annotated[int, Field(strict=True, gt=0)]
+    annotation: AnnotationConfig
 
 
 def cached_annotation(
     text: str,
-    _model: str,
+    _annotation: dict[str, object],
     _endpoint: str,
     _cache_version: int,
     provider: LlmAnnotationProvider,
 ) -> AnnotatedPassage:
     """Annotate text, retaining underscore-prefixed arguments only as cache keys.
 
-    Joblib hashes _model, _endpoint, and _cache_version even though the body does
+    Joblib hashes _annotation, _endpoint, and _cache_version even though the body does
     not use them. The provider is excluded explicitly when configuring the cache.
     """
     return provider.annotate(RawPassage(text))
@@ -112,9 +119,9 @@ def _write_shard(path: Path, passages: Iterable[AnnotatedPassage]) -> None:
             stream.write(json.dumps(asdict(passage), ensure_ascii=False) + "\n")
 
 
-def prepare(args: argparse.Namespace, endpoint: str, token: str) -> None:
+def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
     output: Path = args.output
-    config = vars(args) | {"output": str(output), "endpoint": endpoint}
+    config = args.model_dump(mode="json") | {"endpoint": endpoint}
     _prepare_output(output, config)
 
     logger.info(
@@ -131,22 +138,26 @@ def prepare(args: argparse.Namespace, endpoint: str, token: str) -> None:
         split=args.split,
         streaming=True,
     )
-    if rows.features["text"] not in (Value("string"), Value("large_string")):
+    if rows.features is None or rows.features["text"] not in (
+        Value("string"),
+        Value("large_string"),
+    ):
         raise TypeError("Dataset 'text' feature must be a string")
     memory = Memory(output / ".cache", verbose=0)
     cached = memory.cache(cached_annotation, ignore=["provider"])
+    annotation = args.annotation.model_dump()
     written = failed = with_failures = 0
     with OpenAI(base_url=endpoint, api_key=token) as client:
         provider = LlmAnnotationProvider(
             client=client,
-            model=args.model,
+            config=args.annotation,
             max_inflight=args.workers,
         )
 
         def annotate(passage: RawPassage) -> AnnotatedPassage:
             return cached(
                 passage.text,
-                args.model,
+                annotation,
                 endpoint,
                 ANNOTATION_CACHE_VERSION,
                 provider,
@@ -185,21 +196,17 @@ def prepare(args: argparse.Namespace, endpoint: str, token: str) -> None:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="HuggingFaceFW/fineweb")
-    parser.add_argument("--subset", default="sample-10BT")
-    parser.add_argument("--split", default="train")
-    parser.add_argument("--take", type=take_count, default=100, metavar="N|all")
-    parser.add_argument("--model", default="qwen/qwen3.8-27b")
-    parser.add_argument("--output", type=Path, default=Path("data/fineweb"))
-    parser.add_argument("--workers", type=positive_int, default=4)
-    parser.add_argument("--shard-size", type=positive_int, default=100)
-    args = parser.parse_args()
+@hydra.main(
+    version_base="1.3",
+    config_path=str(Path(__file__).resolve().parents[3] / "config"),
+    config_name="prepare_fineweb",
+)
+def main(config: DictConfig) -> None:
+    args = PrepareConfig.model_validate(OmegaConf.to_container(config, resolve=True))
     endpoint = os.environ.get("MODEL_ENDPOINT", "").strip().rstrip("/")
     token = os.environ.get("MODEL_TOKEN", "").strip()
     if not endpoint or not token:
-        parser.error("MODEL_ENDPOINT and MODEL_TOKEN must be set")
+        raise ValueError("MODEL_ENDPOINT and MODEL_TOKEN must be set")
     if not endpoint.endswith("/v1"):
         endpoint += "/v1"
     prepare(args, endpoint + "/", token)

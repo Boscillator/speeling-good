@@ -7,6 +7,7 @@ import pytest
 from openai import AuthenticationError, OpenAI, RateLimitError
 
 from speeling_good.preprocessing.llm_annotation_provider import (
+    AnnotationConfig,
     LlmAnnotationProvider,
 )
 from speeling_good.preprocessing.types import RawPassage, SpellingAnnotation
@@ -52,14 +53,22 @@ def make_provider(monkeypatch):
         "speeling_good.preprocessing.llm_annotation_provider.time.sleep", lambda _: None
     )
 
-    def make(handler, **options):
+    def make(handler, *, max_inflight=4, **options):
         client = OpenAI(
             api_key="test-token",
             base_url="http://test.invalid/v1",
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         clients.append(client)
-        return LlmAnnotationProvider(client=client, model="test-model", **options)
+        return LlmAnnotationProvider(
+            client=client,
+            config=AnnotationConfig(
+                model="test-model",
+                prompt=options.pop("prompt", "Find spelling mistakes."),
+                **options,
+            ),
+            max_inflight=max_inflight,
+        )
 
     yield make
     for client in clients:
@@ -113,6 +122,48 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
         failure.response == response(bad).json()["choices"][0]["message"]["content"]
         for failure in result.failures
     )
+
+
+def test_custom_prompt_and_sampling_are_preserved_on_retry(make_provider):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return response("{" if len(calls) == 1 else [])
+
+    prompt = "Find spelling errors.\nPreserve technical terms."
+    provider = make_provider(
+        handler,
+        prompt=prompt,
+        temperature=0.7,
+        top_p=0.9,
+        max_completion_tokens=256,
+        seed=0,
+    )
+    result = provider.annotate(RawPassage("clean text"))
+    assert result.annotations == []
+    assert len(calls) == 2
+    for call in calls:
+        assert call["messages"][0] == {"role": "system", "content": prompt}
+        assert call["model"] == "test-model"
+        assert call["temperature"] == 0.7
+        assert call["top_p"] == 0.9
+        assert call["max_completion_tokens"] == 256
+        assert call["seed"] == 0
+        assert call["response_format"]["type"] == "json_schema"
+    assert "Validation failed" in calls[1]["messages"][-1]["content"]
+
+
+def test_optional_sampling_parameters_are_omitted_by_default(make_provider):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return response([])
+
+    make_provider(handler).annotate(RawPassage("clean text"))
+    assert calls[0]["temperature"] == 0
+    assert {"top_p", "max_completion_tokens", "seed"}.isdisjoint(calls[0])
 
 
 def test_output_exhaustion_retains_partial_annotations(make_provider):

@@ -9,8 +9,19 @@ direnv allow
 ```
 
 ## Data preprocessing
+
+Set `MODEL_ENDPOINT` and `MODEL_TOKEN`, then run with the Hydra configuration
+loaded automatically from [config/prepare_fineweb.yaml](config/prepare_fineweb.yaml).
+Override settings with `key=value`; choose a fresh output directory for each run:
+
 ```sh
-prepare-fineweb
+uv run prepare-fineweb output=data/fineweb-experiment annotation.temperature=0.5
+```
+
+Preview the resolved configuration without running annotation:
+
+```sh
+uv run prepare-fineweb --cfg job --resolve
 ```
 
 

@@ -1,8 +1,9 @@
 from threading import Event
 
 import pytest
+from pydantic import ValidationError
 
-from speeling_good.cli.prepare_fineweb import annotate_batches
+from speeling_good.cli.prepare_fineweb import PrepareConfig, annotate_batches
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
@@ -85,3 +86,46 @@ def test_nonvalidation_errors_stop_processing():
                 workers=2,
             )
         )
+
+
+@pytest.mark.parametrize(
+    "override,location",
+    [
+        ({"take": 0}, ("take",)),
+        ({"take": "all"}, ("take",)),
+        ({"workers": True}, ("workers",)),
+        ({"shard_size": -1}, ("shard_size",)),
+        ({"annotation": {"model": " "}}, ("annotation", "model")),
+        ({"annotation": {"prompt": "\n"}}, ("annotation", "prompt")),
+        ({"annotation": {"temperature": 2.1}}, ("annotation", "temperature")),
+        ({"annotation": {"temperature": float("nan")}}, ("annotation", "temperature")),
+        ({"annotation": {"top_p": -0.1}}, ("annotation", "top_p")),
+        ({"annotation": {"top_p": 1.1}}, ("annotation", "top_p")),
+        (
+            {"annotation": {"max_completion_tokens": 0}},
+            ("annotation", "max_completion_tokens"),
+        ),
+        ({"annotation": {"seed": True}}, ("annotation", "seed")),
+        ({"annotation": {"max_attempts": 0}}, ("annotation", "max_attempts")),
+        ({"annotation": {"timeout": float("inf")}}, ("annotation", "timeout")),
+        ({"annotation": {"timeout": 0}}, ("annotation", "timeout")),
+        ({"annotation": {"temprature": 0.5}}, ("annotation", "temprature")),
+    ],
+)
+def test_invalid_run_settings_report_the_configuration_field(override, location):
+    config = {
+        "dataset": "test",
+        "subset": "sample",
+        "split": "train",
+        "take": 10,
+        "output": "unused-output",
+        "workers": 2,
+        "shard_size": 5,
+        "annotation": {"model": "test-model", "prompt": "Find spelling mistakes."},
+    }
+    annotation = config["annotation"] | override.get("annotation", {})
+    config.update(override)
+    config["annotation"] = annotation
+    with pytest.raises(ValidationError) as raised:
+        PrepareConfig.model_validate(config)
+    assert location in [error["loc"] for error in raised.value.errors()]
