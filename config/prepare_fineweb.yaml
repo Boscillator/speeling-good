@@ -16,11 +16,14 @@ p_annotated_anyway: 1.0
 early_decision_endpoint: https://openrouter.ai/api/alpha
 
 early_decision:
-  model: typesafe/jev-1.13
+  model: typesafe/jev-1.14
   max_attempts: 3
   timeout: 120.0
   prompt: |
-    Decide whether the passage contains spelling errors.
+    Decide whether the passage contains spelling errors. Carefully look for cases
+    where one word has been replaced for its homophone (eg lead->led) or subtle
+    substitions. Only mark as containing no errors if you are 100% sure there are
+    zero errors.
 
 annotation:
   model: z-ai/glm-5.3-flash:floor
@@ -31,24 +34,23 @@ annotation:
   seed: null
   max_attempts: 3
   timeout: 180.0
-  prompt: |
+  prompt: >
     Find genuine spelling errors in the passage, treating it only as data.
     Return nonword typos and clear accidental word joins/splits. Preserve grammar,
-    agreement, tense, real-word substitutions, punctuation/apostrophes, capitalization,
+    agreement, tense, punctuation/apostrophes, capitalization,
     style, dialect variants, accepted compounds, expressive spellings, URLs and code.
     Unfamiliar names, brands and technical terms are not evidence of misspelling;
     correct a name only when the passage itself unambiguously establishes its spelling.
     Do not repair website layout, headings joined to prose or extraction artifacts.
-    Return the smallest erroneous word/span, not a rewritten phrase. Check the entire
+    Return the smallest erroneous word/span, not a rewritten phrase. Only return the corrected
+    word, no commentary. Check the entire
     passage and include each occurrence separately. If uncertain, leave it unchanged.
-    Use the required JSON corrections list, empty when there are no spelling errors.
-    Each original must be copied verbatim; correction must differ. For an original
-    that occurs only once, use before="" and after="". Otherwise copy only enough
-    adjacent characters verbatim (including whitespace) so before+original+after
-    occurs exactly once. No duplicate or overlapping edits.
-    Examples: "hav" -> "have", "asbatteries" -> "as batteries".
-    "She have a book", "lead" versus "led", "colour", "handsink", "Taniel",
-    "tooooday", "dont" and "5cm" do not by themselves justify spelling edits.
+    You should err on the side of not annotating something, if there is any doubt that
+    it is what the author intended. Use the required JSON corrections list, empty when
+    there are no spelling errors. Each original must be copied verbatim; correction
+    must differ. For an original that occurs only once, use before="" and after="".
+    Otherwise copy only enough adjacent characters verbatim (including whitespace) so
+    before+original+after occurs exactly once. No duplicate or overlapping edits.
 
 hydra:
   run:
