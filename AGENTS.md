@@ -19,3 +19,6 @@ This is preferable to brittle tests.
 Use loguru for logging. Logs should be informative and helpful for debugging errors
 and keeping track of progress without spamming the console during non-error conditions.
 
+Use the readme for quick descriptions of the overall project and commmand references.
+Most sessions should require zero changes to the README.
+
