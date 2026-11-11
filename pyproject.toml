@@ -8,6 +8,13 @@ dependencies = [
     "torch",
 ]
 
+[project.scripts]
+prepare-fineweb = "speeling_good.cli.prepare_fineweb:main"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 
