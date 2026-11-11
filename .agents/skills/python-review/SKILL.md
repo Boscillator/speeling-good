@@ -45,6 +45,9 @@ which field. Keep loops for genuinely repeated operations over data or sufficien
 large uniform sets. Preserve meaningful validation and field-specific errors;
 readability is the reason to change the structure, not to weaken the rules.
 
+Prefix unused parameters with an underscore and document why they are needed.
+If an unused parameter must keep its name, document that reason too.
+
 ### Test pure business logic directly
 
 A pure function that performs meaningful decisions, matching, transformations, or
@@ -65,11 +68,20 @@ needed, following repository policy.
 
 ### Justify safeguards and preserve useful errors
 
-Question defensive code and categorical comments whose rationale does not fit the
-actual data flow. Explain what concrete failure or disclosure a safeguard prevents
-and at which boundary. A warning about sensitive content in logs is not by itself
-a reason to hide validation details from the same model that already received the
-input. Keep useful field and validation information for debugging and recovery.
+Avoid unnecessary defensive coding. Each safeguard should prevent a concrete
+failure at a clear boundary in the actual data flow.
+
+For example, validate shared schema invariants once at the dataset or service
+boundary, then trust them in per-item processing. Let built-in exceptions surface
+broken upstream invariants unless translation adds useful context.
+
+When a simple precondition such as requiring a new output directory suffices,
+prefer it over inspecting and reconciling individual artifacts. Add resume or
+compatibility logic only when that behavior is required.
+
+A warning about sensitive content in logs is not by itself a reason to hide
+validation details from the same model that already received the input. Keep
+useful field and validation information for debugging and recovery.
 
 Choose error detail according to the recipient and actual project requirements.
 Do not infer a blanket ban on Pydantic errors, or a blanket permission to log raw

@@ -1,7 +1,7 @@
 # Speeling Good
 Machine learning based spell checker research project.
 
-Use `uv` for all commands. You should already be inside the nix dev shell, but
+Use `uv` for all python commands. You should already be inside the nix dev shell, but
 if not you can use `nix develop` to activate the enviroment.
 
 The name of the project, speeling-good, is deliberately misspelled. Other
