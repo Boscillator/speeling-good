@@ -6,7 +6,7 @@ import time
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from threading import BoundedSemaphore
-from typing import Annotated
+from typing import Annotated, Literal
 
 from loguru import logger
 from openai import (
@@ -33,9 +33,12 @@ class AnnotationConfig(BaseModel):
 
     model: str
     prompt: str
-    temperature: Annotated[float, Field(ge=0, le=2)] = 0.0
+    temperature: Annotated[float, Field(ge=0, le=2)] | None = 0.0
     top_p: Annotated[float, Field(ge=0, le=1)] | None = None
     max_completion_tokens: Annotated[int, Field(gt=0)] | None = None
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = None
     seed: int | None = None
     max_attempts: Annotated[int, Field(gt=0)] = 3
     timeout: Annotated[float, Field(gt=0)] = 120.0
@@ -309,7 +312,11 @@ class LlmAnnotationProvider:
                         "schema": Corrections.model_json_schema(),
                     },
                 },
-                temperature=self._config.temperature,
+                temperature=(
+                    self._config.temperature
+                    if self._config.temperature is not None
+                    else omit
+                ),
                 top_p=self._config.top_p if self._config.top_p is not None else omit,
                 max_completion_tokens=(
                     self._config.max_completion_tokens
@@ -317,6 +324,11 @@ class LlmAnnotationProvider:
                     else omit
                 ),
                 seed=self._config.seed if self._config.seed is not None else omit,
+                extra_body=(
+                    {"reasoning": {"effort": self._config.reasoning_effort}}
+                    if self._config.reasoning_effort is not None
+                    else None
+                ),
             )
 
     def _retry_or_raise(

@@ -124,7 +124,11 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
     )
 
 
-def test_custom_prompt_and_sampling_are_preserved_on_retry(make_provider):
+@pytest.mark.parametrize("temperature", [None, 0.7])
+@pytest.mark.parametrize("reasoning_effort", ["none", "minimal", "max"])
+def test_custom_prompt_and_sampling_are_preserved_on_retry(
+    make_provider, temperature, reasoning_effort
+):
     calls = []
 
     def handler(request):
@@ -135,9 +139,10 @@ def test_custom_prompt_and_sampling_are_preserved_on_retry(make_provider):
     provider = make_provider(
         handler,
         prompt=prompt,
-        temperature=0.7,
+        temperature=temperature,
         top_p=0.9,
         max_completion_tokens=256,
+        reasoning_effort=reasoning_effort,
         seed=0,
     )
     result = provider.annotate(RawPassage("clean text"))
@@ -146,10 +151,14 @@ def test_custom_prompt_and_sampling_are_preserved_on_retry(make_provider):
     for call in calls:
         assert call["messages"][0] == {"role": "system", "content": prompt}
         assert call["model"] == "test-model"
-        assert call["temperature"] == 0.7
+        if temperature is None:
+            assert "temperature" not in call
+        else:
+            assert call["temperature"] == temperature
         assert call["top_p"] == 0.9
         assert call["max_completion_tokens"] == 256
         assert call["seed"] == 0
+        assert call["reasoning"] == {"effort": reasoning_effort}
         assert call["response_format"]["type"] == "json_schema"
     assert "Validation failed" in calls[1]["messages"][-1]["content"]
 
@@ -163,7 +172,7 @@ def test_optional_sampling_parameters_are_omitted_by_default(make_provider):
 
     make_provider(handler).annotate(RawPassage("clean text"))
     assert calls[0]["temperature"] == 0
-    assert {"top_p", "max_completion_tokens", "seed"}.isdisjoint(calls[0])
+    assert {"top_p", "max_completion_tokens", "seed", "reasoning"}.isdisjoint(calls[0])
 
 
 def test_output_exhaustion_retains_partial_annotations(make_provider):

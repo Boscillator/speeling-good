@@ -23,31 +23,42 @@ For a custom configuration, copy the default YAML into the config directory as
 `experiment.yaml` and edit it. Previous argparse flags are replaced by Hydra
 options; `take=null` replaces `--take all`.
 
-Top-level settings retain these defaults:
+Top-level settings use these defaults:
 
 - `dataset`: `HuggingFaceFW/fineweb`.
 - `subset`: dataset `name`, `sample-10BT`.
 - `split`: `train`.
 - `take`: `100`; a positive input count including failures, or `null` for all.
 - `output`: `data/fineweb`; each invocation requires a fresh directory.
-- `workers`: `4` positive annotation threads.
-- `shard_size`: `100` positive input entries per shard.
+- `workers`: `2` positive annotation threads.
+- `shard_size`: `10` positive input entries per shard.
 
 The `annotation` section controls model requests:
 
-- `model`: `qwen/qwen3.8-27b`.
-- `prompt`: the current spelling-only system prompt, stored as multiline YAML.
-- `temperature`: `0.0`, within `[0, 2]`.
+- `model`: `z-ai/glm-5.3-flash:floor`.
+- `prompt`: the evaluated strict spelling-only system prompt, stored as multiline YAML.
+- `temperature`: `0.0`, within `[0, 2]`, or `null` to omit it for models that do not
+  support temperature.
 - `top_p`: `null`, or a value within `[0, 1]`.
-- `max_completion_tokens`: `null`, or a positive integer.
+- `max_completion_tokens`: `8192`, or `null` to omit the cap; otherwise a positive
+  integer.
+- `reasoning_effort`: `low` by default; accepts `null`, `none`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, or `max`. An explicit value is sent as OpenRouter's
+  `reasoning.effort`; support depends on the model. Null keeps the server default,
+  which may incur reasoning token charges.
 - `seed`: `null`, or an integer; reproducibility depends on the server.
 - `max_attempts`: `3`, including the initial request.
-- `timeout`: `120.0` positive, finite seconds per request.
+- `timeout`: `180.0` positive, finite seconds per request.
 
 Null optional sampling controls are omitted from requests. The output schema and
 validation feedback remain fixed. Counts, model settings, and unknown fields are
 validated before output creation or external requests. `--help` and `--cfg job`
 work without endpoint credentials.
+
+The sole built-in profile uses the winning settings evaluated on the first 100
+FineWeb entries. Its spelling policy, measured costs, remaining non-spelling edits,
+and evaluation limits are documented in the
+[profile evaluation](fineweb_annotation_profile_evaluation.md).
 
 Hydra keeps the working directory unchanged. Ordinary runs create no separate
 Hydra snapshots or log files; application logging continues through Loguru.

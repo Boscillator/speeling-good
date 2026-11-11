@@ -106,6 +106,10 @@ def test_nonvalidation_errors_stop_processing():
             ("annotation", "max_completion_tokens"),
         ),
         ({"annotation": {"seed": True}}, ("annotation", "seed")),
+        (
+            {"annotation": {"reasoning_effort": "maximum"}},
+            ("annotation", "reasoning_effort"),
+        ),
         ({"annotation": {"max_attempts": 0}}, ("annotation", "max_attempts")),
         ({"annotation": {"timeout": float("inf")}}, ("annotation", "timeout")),
         ({"annotation": {"timeout": 0}}, ("annotation", "timeout")),
