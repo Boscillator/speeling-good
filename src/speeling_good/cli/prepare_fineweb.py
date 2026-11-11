@@ -3,6 +3,7 @@
 import json
 import os
 import random
+import sys
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -33,6 +34,7 @@ from speeling_good.preprocessing.types import (
     PassageWithEarlyDecision,
     RawPassage,
 )
+from speeling_good.preprocessing.usage import UsageTracker
 
 # Bump when resolution rules or output types change; prompts are hashed directly.
 ANNOTATION_CACHE_VERSION = 3
@@ -175,11 +177,35 @@ def _write_shard(path: Path, passages: Iterable[AnnotatedPassage]) -> None:
             stream.write(json.dumps(asdict(passage), ensure_ascii=False) + "\n")
 
 
+def _write_usage(output: Path, usage: UsageTracker) -> None:
+    with atomic_text(output / "usage.json") as stream:
+        json.dump(usage.snapshot(), stream, indent=2)
+        stream.write("\n")
+
+
 def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
-    output: Path = args.output
-    decision_endpoint = args.early_decision_endpoint
     config = args.model_dump(mode="json") | {"endpoint": endpoint}
-    _prepare_output(output, config)
+    _prepare_output(args.output, config)
+    usage = UsageTracker()
+    _write_usage(args.output, usage)
+    try:
+        _run_pipeline(args, endpoint, token, usage)
+    finally:
+        # A failed final write must not hide the error that stopped the pipeline.
+        failed = sys.exception() is not None
+        try:
+            _write_usage(args.output, usage)
+        except OSError as error:
+            if not failed:
+                raise
+            logger.error("Could not save token usage after pipeline failure: {}", error)
+
+
+def _run_pipeline(
+    args: PrepareConfig, endpoint: str, token: str, usage: UsageTracker
+) -> None:
+    output = args.output
+    decision_endpoint = args.early_decision_endpoint
 
     logger.info(
         "Preparing {}/{} ({}, take={}, workers={})",
@@ -214,11 +240,13 @@ def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
             client=client,
             config=args.annotation,
             max_inflight=args.workers,
+            usage=usage,
         )
         decision_provider = EarlyDecisionProvider(
             client=decision_client,
             config=args.early_decision,
             max_inflight=args.workers,
+            usage=usage,
         )
 
         def annotate(passage: RawPassage) -> PreparedPassage:
@@ -262,6 +290,7 @@ def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
             skipped += sum(result.skipped for result in results)
             shard = output / f"part-{index:05d}.jsonl"
             _write_shard(shard, batch)
+            _write_usage(output, usage)
             batch_failed = sum(passage.annotations is None for passage in batch)
             batch_with_failures = sum(bool(passage.failures) for passage in batch)
             batch_decision_failures = sum(

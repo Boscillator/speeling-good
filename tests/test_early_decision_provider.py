@@ -12,6 +12,7 @@ from speeling_good.preprocessing.early_decision_provider import (
     EarlyDecisionProvider,
 )
 from speeling_good.preprocessing.types import EarlyDecision, RawPassage
+from speeling_good.preprocessing.usage import UsageTracker
 
 
 def response(choice="error", confidence=0.8):
@@ -39,7 +40,7 @@ def make_provider(monkeypatch):
         "speeling_good.preprocessing.early_decision_provider.time.sleep", lambda _: None
     )
 
-    def make(handler, *, max_inflight=4, **options):
+    def make(handler, *, max_inflight=4, usage=None, **options):
         client = OpenAI(
             api_key="test-token",
             base_url="https://openrouter.invalid/api/alpha",
@@ -54,11 +55,39 @@ def make_provider(monkeypatch):
                 **options,
             ),
             max_inflight=max_inflight,
+            usage=usage,
         )
 
     yield make
     for client in clients:
         client.close()
+
+
+def test_usage_includes_invalid_decisions_and_missing_metadata_on_retries(
+    make_provider,
+):
+    usage = UsageTracker()
+    invalid = response().json()
+    invalid["answers"] = {}
+    responses = iter(
+        [
+            httpx.Response(200, json=invalid),
+            httpx.Response(200, text="{"),
+            response("clean"),
+        ]
+    )
+    result = make_provider(lambda _: next(responses), usage=usage).decide(
+        RawPassage("clean text")
+    )
+
+    assert result.decision == EarlyDecision(False, 0.8)
+    assert usage.snapshot()["early_decision"] == {
+        "input_tokens": 80,
+        "output_tokens": 0,
+        "total_tokens": 80,
+        "responses": 3,
+        "responses_without_usage": 1,
+    }
 
 
 @pytest.mark.parametrize("model", ["typesafe/jev-1.13", "openai/gpt-6-luna-decisions"])

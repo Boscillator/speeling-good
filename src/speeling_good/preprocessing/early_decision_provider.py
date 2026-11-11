@@ -1,5 +1,6 @@
 """Fast spelling judgments through OpenRouter's shared Decisions API."""
 
+import json
 import time
 from threading import BoundedSemaphore
 from typing import Annotated, Literal
@@ -15,6 +16,7 @@ from speeling_good.preprocessing.types import (
     PassageWithEarlyDecision,
     RawPassage,
 )
+from speeling_good.preprocessing.usage import UsageTracker
 
 
 class EarlyDecisionConfig(BaseModel):
@@ -77,6 +79,7 @@ class EarlyDecisionProvider:
         client: OpenAI,
         config: EarlyDecisionConfig,
         max_inflight: int = 4,
+        usage: UsageTracker | None = None,
     ) -> None:
         if (
             isinstance(max_inflight, bool)
@@ -87,6 +90,7 @@ class EarlyDecisionProvider:
         self._config = config
         self._client = client.with_options(max_retries=0, timeout=config.timeout)
         self._semaphore = BoundedSemaphore(max_inflight)
+        self._usage = usage
 
     def decide(self, passage: RawPassage) -> PassageWithEarlyDecision:
         failures: list[EarlyDecisionFailure] = []
@@ -96,6 +100,16 @@ class EarlyDecisionProvider:
             except (APIConnectionError, APIStatusError) as error:
                 self._retry_or_raise(error, attempt)
                 continue
+
+            if self._usage is not None:
+                try:
+                    data = json.loads(response)
+                except ValueError:
+                    data = None
+                self._usage.record(
+                    "early_decision",
+                    data.get("usage") if isinstance(data, dict) else None,
+                )
 
             try:
                 answer = _DecisionResponse.model_validate_json(

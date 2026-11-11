@@ -24,6 +24,7 @@ from speeling_good.preprocessing.types import (
     PassageWithEarlyDecision,
     SpellingAnnotation,
 )
+from speeling_good.preprocessing.usage import UsageTracker
 
 
 class AnnotationConfig(BaseModel):
@@ -247,6 +248,7 @@ class LlmAnnotationProvider:
         client: OpenAI,
         config: AnnotationConfig,
         max_inflight: int = 4,
+        usage: UsageTracker | None = None,
     ) -> None:
         if (
             isinstance(max_inflight, bool)
@@ -257,6 +259,7 @@ class LlmAnnotationProvider:
         self._config = config
         self._client = client.with_options(max_retries=0, timeout=config.timeout)
         self._semaphore = BoundedSemaphore(max_inflight)
+        self._usage = usage
 
     def annotate(self, passage: PassageWithEarlyDecision) -> AnnotatedPassage:
         messages: list[ChatCompletionMessageParam] = [
@@ -271,6 +274,13 @@ class LlmAnnotationProvider:
             except (APIConnectionError, APIStatusError) as error:
                 self._retry_or_raise(error, attempt)
                 continue
+            if self._usage is not None:
+                self._usage.record(
+                    "annotation",
+                    completion.usage.model_dump()
+                    if completion.usage is not None
+                    else None,
+                )
             result = _evaluate_response(passage.text, completion, attempt + 1)
             failures.extend(result.failures)
             if not result.failures:

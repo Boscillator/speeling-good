@@ -16,6 +16,7 @@ from speeling_good.preprocessing.types import (
     PassageWithEarlyDecision,
     SpellingAnnotation,
 )
+from speeling_good.preprocessing.usage import UsageTracker
 
 
 @pytest.mark.parametrize("outcome", ["success", "recovery", "partial", "exhaustion"])
@@ -90,7 +91,7 @@ def make_provider(monkeypatch):
         "speeling_good.preprocessing.llm_annotation_provider.time.sleep", lambda _: None
     )
 
-    def make(handler, *, max_inflight=4, **options):
+    def make(handler, *, max_inflight=4, usage=None, **options):
         client = OpenAI(
             api_key="test-token",
             base_url="http://test.invalid/v1",
@@ -105,11 +106,41 @@ def make_provider(monkeypatch):
                 **options,
             ),
             max_inflight=max_inflight,
+            usage=usage,
         )
 
     yield make
     for client in clients:
         client.close()
+
+
+def test_usage_counts_invalid_output_but_not_transport_failures(make_provider):
+    usage = UsageTracker()
+    invalid = response("{").json()
+    invalid["usage"] = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+    }
+    responses = iter(
+        [
+            httpx.Response(429, json={"error": {"message": "try later"}}),
+            httpx.Response(200, json=invalid),
+            response([]),
+        ]
+    )
+    result = make_provider(lambda _: next(responses), usage=usage).annotate(
+        PassageWithEarlyDecision("clean text", None)
+    )
+
+    assert result.annotations == []
+    assert usage.snapshot()["annotation"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "responses": 2,
+        "responses_without_usage": 1,
+    }
 
 
 def test_exact_context_unicode_and_sorted_spans(make_provider):
