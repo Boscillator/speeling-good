@@ -44,7 +44,7 @@ is controlled separately by the constructor argument `max_inflight=4`.
   or `annotations=None` if none was obtained, and retains transport diagnostics.
   A `length` finish reason stops retries immediately: repeating the same capped
   request would risk paying for another truncated response.
-- Caching belongs to the preparation CLI; the provider does not cache results.
+- The preparation CLI checkpoints completed shards; the provider does not cache results.
 - The client should expect to be called from multiple python threads. Furthermore, it should limit the number
   of inflight requests to a configurable number.
 

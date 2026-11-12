@@ -279,3 +279,27 @@ def test_clean_passages_are_sampled_by_probability(
     monkeypatch.setattr("speeling_good.cli.prepare_fineweb.random.random", lambda: draw)
     passage = PassageWithEarlyDecision("clean", EarlyDecision(False, 1.0))
     assert should_annotate(passage, probability) is expected
+
+
+@pytest.mark.parametrize(
+    "take,expected", [(5, ["3", "4"]), (None, ["3", "4", "5"]), (2, [])]
+)
+def test_resume_skips_completed_rows_and_keeps_take_as_total(take, expected):
+    requested = []
+
+    def annotate(passage):
+        requested.append(passage.text)
+        return PreparedPassage(AnnotatedPassage(passage.text, []))
+
+    batches = list(
+        annotate_batches(
+            [{"text": str(index)} for index in range(6)],
+            annotate,
+            take=take,
+            shard_size=2,
+            workers=1,
+            completed_rows=3,
+        )
+    )
+    assert [item.passage.text for batch in batches for item in batch] == expected
+    assert requested == expected

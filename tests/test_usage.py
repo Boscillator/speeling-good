@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from speeling_good.preprocessing.usage import UsageTracker
 
 
@@ -119,3 +121,29 @@ def test_zero_cost_is_distinct_from_missing_or_invalid_cost():
     assert result["cost"] == 0.125
     assert result["responses_without_cost"] == 6
     assert result["responses_without_usage"] == 8
+
+
+def test_resumed_usage_accumulates_stages_and_retains_previous_snapshot():
+    previous = UsageTracker()
+    previous.record("annotation", {"input_tokens": 10, "cost": 0.25})
+    previous.record("early_decision", {"input_tokens": 3, "output_tokens": 1})
+    saved = previous.snapshot()
+    resumed = UsageTracker.from_snapshot(saved)
+    resumed.record("annotation", {"input_tokens": 5, "output_tokens": 2, "cost": 0.125})
+    result = resumed.snapshot()
+    assert result["early_decision"] == saved["early_decision"]
+    assert result["annotation"]["input_tokens"] == 15
+    assert result["annotation"]["responses"] == 2
+    assert result["total"]["total_tokens"] == 21
+    assert result["total"]["cost"] == 0.375
+    assert saved["annotation"]["input_tokens"] == 10
+
+
+@pytest.mark.parametrize(
+    "invalid", [None, True, -1, 1.5, "10", float("nan"), float("inf")]
+)
+def test_invalid_saved_usage_does_not_silently_reset_totals(invalid):
+    saved = UsageTracker().snapshot()
+    saved["annotation"]["input_tokens"] = invalid
+    with pytest.raises(ValueError, match="annotation.input_tokens"):
+        UsageTracker.from_snapshot(saved)

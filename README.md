@@ -12,7 +12,8 @@ direnv allow
 
 Set `MODEL_ENDPOINT` and `MODEL_TOKEN`, then run with the Hydra configuration
 loaded automatically from [config/prepare_fineweb.yaml](config/prepare_fineweb.yaml).
-Override settings with `key=value`; choose a fresh output directory for each run:
+Override settings with `key=value`. Reusing an output directory resumes after its
+completed shards; `take` remains the total row limit across runs:
 
 ```sh
 uv run prepare-fineweb output=data/fineweb-experiment annotation.temperature=0.5

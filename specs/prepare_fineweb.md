@@ -30,14 +30,14 @@ Top-level settings use these defaults:
 - `subset`: dataset `name`, `sample-10BT`.
 - `split`: `train`.
 - `take`: `100`; a positive input count including failures, or `null` for all.
-- `output`: `data/fineweb`; each invocation requires a fresh directory.
+- `output`: `data/fineweb`; an existing directory resumes from completed shards.
 - `workers`: `2` positive annotation threads.
 - `shard_size`: `10` positive input entries per shard.
 - `p_annotated_anyway`: `1.0`, a finite probability in `[0, 1]` for fully annotating
   passages classified as clean. Errors and unknown decisions always receive full annotation.
 - `early_decision_endpoint`: `https://openrouter.ai/api/alpha`, using `MODEL_TOKEN`.
 - `skip_early_decision`: `false`. Set to `true` to bypass the decision client,
-  provider, cache, and sampling gate. Every passage receives full annotation,
+  provider and sampling gate. Every passage receives full annotation,
   regardless of `p_annotated_anyway`, with `decision: null` and empty
   `early_decision_failures`.
 
@@ -83,7 +83,7 @@ uv run prepare-fineweb -m annotation.temperature=0,0.5 'output=data/sweep-${hydr
 ```
 
 Set `MODEL_ENDPOINT` and `MODEL_TOKEN`. The endpoint may include `/v1/` or omit
-it. Credentials are never written to the configuration or cache.
+it. Credentials are never written to the configuration.
 
 ## Pipeline and sharding
 
@@ -95,7 +95,7 @@ Unknown decisions proceed to full annotation with their diagnostics retained.
 Clean decisions are independently sampled for full annotation using
 `p_annotated_anyway`; at `1.0`, every passage is fully annotated for comparison.
 Skipped clean passages remain in output with `annotations: []` and their decision.
-Sampling occurs outside both caches; no random seed or cross-run reproducibility
+Sampling occurs independently for each new passage; no random seed or cross-run reproducibility
 is promised. The annotation model receives only the text, without the decision.
 Results retain input order. Requests continue across shard boundaries, with a
 bounded window of `shard_size + 2 * workers` queued, active, or out-of-order results,
@@ -130,28 +130,27 @@ separately per stage and overall. Cached and reasoning tokens are subsets of the
 token totals. Missing costs are not estimated or treated as known zero charges.
 Because requests overlap shard writes, usage snapshots can include responses for
 passages in later shards; the final snapshot includes all completed responses.
-Each completed file replaces its destination atomically. Every invocation requires
-a new output directory; an existing directory raises `FileExistsError` before
-loading data. An interrupted run may leave completed shards and requires a new
-output directory for another invocation.
+Each completed file replaces its destination atomically. Reusing an output directory
+resumes after its completed shards. Existing usage totals accumulate across invocations.
+Reported requests beyond the last committed shard still count toward usage even when
+those rows need processing again. An abrupt termination can lose usage since the latest
+snapshot.
 
 PyArrow is capped at 24.0.0 to retain datasets' workaround for crashes when
 stopping Parquet streams early (huggingface/datasets#8793).
 
-## Caching
+## Checkpointing
 
-Joblib `Memory` stores decision and annotation results separately under
-`<output>/.cache`. Decision keys include text, the full decision configuration,
-normalized decision endpoint and decision-cache version. Annotation keys include
-the passage with its decision and decision diagnostics, the full annotation
-configuration (including prompt, sampling, timeout and attempt budget), normalized
-annotation endpoint and annotation-cache version.
-Provider objects, clients, and credentials are excluded from cache identity.
-Partial and failed output results are cached with their diagnostics; raised errors
-are not cached. Bump the cache version when annotation resolution rules or output
-types change; prompt changes are hashed directly. Replacing model weights behind
-the same endpoint/model identifier requires removing the cache or choosing a new
-output directory.
+Completed `part-*.jsonl` files are the checkpoints. At startup, count their actual
+rows and skip that prefix of the input dataset before making model calls. Shards
+must form a contiguous sequence starting at zero; empty or malformed shards stop
+the run before processing. Temporary files and legacy `.cache` contents are ignored.
+Existing shards are preserved, including short shards and rows with failed annotations.
+New shards continue numbering after the last completed shard. `take` is the total
+input-row limit across invocations; an already-satisfied limit makes no model calls.
 
-Repeated passages within a run reuse cached results. Cache artifacts are
-retained in the output directory, but the command does not resume existing runs.
+All configuration changes are allowed. `config.yaml` records the latest invocation's
+settings, and the current shard size applies to new shards. Input order is assumed
+stable; changing the dataset still uses the saved row count as the input offset.
+There is no per-call caching or deduplication. Work not saved in a completed shard
+is repeated on resume, including early decisions and sampling.

@@ -31,7 +31,7 @@ def _token_count(usage: Mapping[str, object], *names: str) -> int | None:
 
 
 class UsageTracker:
-    """Sum reported tokens, including retries but excluding cached results.
+    """Sum reported tokens, including retries across resumed runs.
 
     Missing counts contribute zero; totals fall back to input plus output when
     omitted. A response is counted as missing usage if it has no valid token
@@ -45,6 +45,30 @@ class UsageTracker:
             "early_decision": _Usage(),
             "annotation": _Usage(),
         }
+
+    @classmethod
+    def from_snapshot(cls, snapshot: object) -> "UsageTracker":
+        """Restore reported stage totals; overall totals are derived from stages."""
+        if not isinstance(snapshot, Mapping):
+            raise TypeError("Usage snapshot must be an object")
+        tracker = cls()
+        for stage, usage in tracker._stages.items():
+            counts = snapshot.get(stage)
+            if not isinstance(counts, Mapping):
+                raise TypeError(f"Missing usage stage: {stage}")
+            for name in asdict(usage):
+                value = counts.get(name)
+                valid = (
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and isfinite(value)
+                    and value >= 0
+                    and (name == "cost" or isinstance(value, int))
+                )
+                if not valid:
+                    raise ValueError(f"Invalid usage count: {stage}.{name}")
+                setattr(usage, name, value)
+        return tracker
 
     def record(self, stage: UsageStage, usage: object) -> None:
         counts = usage if isinstance(usage, Mapping) else {}

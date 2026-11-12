@@ -1,4 +1,4 @@
-"""Stream FineWeb into cached, annotated JSONL shards."""
+"""Stream FineWeb into resumable annotated JSONL shards."""
 
 import json
 import os
@@ -17,7 +17,6 @@ from typing import IO, Annotated, cast
 import hydra
 import yaml
 from datasets import Value, load_dataset
-from joblib import Memory
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
@@ -37,10 +36,6 @@ from speeling_good.preprocessing.types import (
     RawPassage,
 )
 from speeling_good.preprocessing.usage import UsageTracker
-
-# Bump when resolution rules or output types change; prompts are hashed directly.
-ANNOTATION_CACHE_VERSION = 4
-EARLY_DECISION_CACHE_VERSION = 1
 
 
 class PrepareConfig(BaseModel):
@@ -80,32 +75,6 @@ class PreparedPassage:
 
     passage: AnnotatedPassage
     skipped: bool = False
-
-
-def cached_early_decision(
-    text: str,
-    _early_decision: dict[str, object],
-    _endpoint: str,
-    _cache_version: int,
-    provider: EarlyDecisionProvider,
-) -> PassageWithEarlyDecision:
-    """Cache decision results independently of gate sampling and annotation."""
-    return provider.decide(RawPassage(text))
-
-
-def cached_annotation(
-    passage: PassageWithEarlyDecision,
-    _annotation: dict[str, object],
-    _endpoint: str,
-    _cache_version: int,
-    provider: LlmAnnotationProvider,
-) -> AnnotatedPassage:
-    """Annotate text, retaining underscore-prefixed arguments only as cache keys.
-
-    Joblib hashes _annotation, _endpoint, and _cache_version even though the body does
-    not use them. The provider is excluded explicitly when configuring the cache.
-    """
-    return provider.annotate(passage)
 
 
 def should_annotate(
@@ -151,12 +120,16 @@ def annotate_batches(
     take: int | None,
     shard_size: int,
     workers: int,
+    completed_rows: int = 0,
 ) -> Generator[list[PreparedPassage]]:
     """Keep a bounded request window running across ordered shard boundaries."""
 
     source = iter(rows)
     try:
-        passages = (RawPassage(cast(str, row["text"])) for row in islice(source, take))
+        if take is not None and completed_rows >= take:
+            return
+        remaining = islice(source, completed_rows, take)
+        passages = (RawPassage(cast(str, row["text"])) for row in remaining)
         with closing(
             _annotate_in_order(
                 passages,
@@ -193,12 +166,31 @@ def atomic_text(path: Path) -> Generator[IO[str]]:
             temporary.unlink(missing_ok=True)
 
 
-def _prepare_output(output: Path, config: dict[str, object]) -> None:
-    """Create a fresh output directory and persist its configuration."""
-    output.mkdir(parents=True)
-    config_path = output / "config.yaml"
-    with atomic_text(config_path) as stream:
-        yaml.safe_dump(config, stream, sort_keys=True)
+def _completed_shards(output: Path) -> tuple[int, int]:
+    """Count the committed input prefix, rejecting ambiguous checkpoints."""
+    shards = sorted(output.glob("part-*.jsonl"), key=lambda path: int(path.stem[5:]))
+    completed_rows = 0
+    for index, shard in enumerate(shards):
+        if shard.name != f"part-{index:05d}.jsonl":
+            raise ValueError(f"Expected part-{index:05d}.jsonl, found {shard.name}")
+        count = 0
+        with shard.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                try:
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or not isinstance(
+                        row.get("text"), str
+                    ):
+                        raise TypeError("Expected a passage object with string text")
+                except (ValueError, TypeError) as error:
+                    raise ValueError(
+                        f"Invalid checkpoint {shard}:{line_number}"
+                    ) from error
+                count += 1
+        if not count:
+            raise ValueError(f"Empty checkpoint: {shard}")
+        completed_rows += count
+    return len(shards), completed_rows
 
 
 def _write_shard(path: Path, passages: Iterable[AnnotatedPassage]) -> None:
@@ -215,12 +207,26 @@ def _write_usage(output: Path, usage: UsageTracker) -> None:
 
 
 def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
+    args.output.mkdir(parents=True, exist_ok=True)
+    completed_shards, completed_rows = _completed_shards(args.output)
+    usage_path = args.output / "usage.json"
+    usage = (
+        UsageTracker.from_snapshot(json.loads(usage_path.read_text(encoding="utf-8")))
+        if usage_path.exists()
+        else UsageTracker()
+    )
     config = args.model_dump(mode="json") | {"endpoint": endpoint}
-    _prepare_output(args.output, config)
-    usage = UsageTracker()
+    with atomic_text(args.output / "config.yaml") as stream:
+        yaml.safe_dump(config, stream, sort_keys=True)
+    logger.info(
+        "Resuming from {} completed shards ({} rows)", completed_shards, completed_rows
+    )
+    if args.take is not None and completed_rows >= args.take:
+        logger.info("Requested take={} is already complete", args.take)
+        return
     _write_usage(args.output, usage)
     try:
-        _run_pipeline(args, endpoint, token, usage)
+        _run_pipeline(args, endpoint, token, usage, completed_shards, completed_rows)
     finally:
         # A failed final write must not hide the error that stopped the pipeline.
         failed = sys.exception() is not None
@@ -233,7 +239,12 @@ def prepare(args: PrepareConfig, endpoint: str, token: str) -> None:
 
 
 def _run_pipeline(
-    args: PrepareConfig, endpoint: str, token: str, usage: UsageTracker
+    args: PrepareConfig,
+    endpoint: str,
+    token: str,
+    usage: UsageTracker,
+    completed_shards: int,
+    completed_rows: int,
 ) -> None:
     output = args.output
     decision_endpoint = args.early_decision_endpoint
@@ -257,9 +268,6 @@ def _run_pipeline(
         Value("large_string"),
     ):
         raise TypeError("Dataset 'text' feature must be a string")
-    memory = Memory(output / ".cache", verbose=0)
-    cached = memory.cache(cached_annotation, ignore=["provider"])
-    annotation = args.annotation.model_dump()
     written = failed = with_failures = decision_failures = skipped = 0
     with ExitStack() as stack:
         client = stack.enter_context(OpenAI(base_url=endpoint, api_key=token))
@@ -282,19 +290,11 @@ def _run_pipeline(
                 max_inflight=args.workers,
                 usage=usage,
             )
-            cached_decide = memory.cache(cached_early_decision, ignore=["provider"])
-            early_decision = args.early_decision.model_dump()
 
         def annotate(passage: RawPassage) -> PreparedPassage:
             decided = PassageWithEarlyDecision(passage.text, None)
             if decision_provider is not None:
-                decided = cached_decide(
-                    passage.text,
-                    early_decision,
-                    decision_endpoint,
-                    EARLY_DECISION_CACHE_VERSION,
-                    decision_provider,
-                )
+                decided = decision_provider.decide(passage)
                 if not should_annotate(decided, args.p_annotated_anyway):
                     return PreparedPassage(
                         AnnotatedPassage(
@@ -305,15 +305,7 @@ def _run_pipeline(
                         ),
                         skipped=True,
                     )
-            return PreparedPassage(
-                cached(
-                    decided,
-                    annotation,
-                    endpoint,
-                    ANNOTATION_CACHE_VERSION,
-                    provider,
-                )
-            )
+            return PreparedPassage(provider.annotate(decided))
 
         for index, results in enumerate(
             annotate_batches(
@@ -322,7 +314,9 @@ def _run_pipeline(
                 take=args.take,
                 shard_size=args.shard_size,
                 workers=args.workers,
-            )
+                completed_rows=completed_rows,
+            ),
+            start=completed_shards,
         ):
             batch = [result.passage for result in results]
             skipped += sum(result.skipped for result in results)
@@ -350,7 +344,7 @@ def _run_pipeline(
             )
 
     logger.info(
-        "Finished: {} written, {} usable, {} failed, {} with annotation failure "
+        "Finished this invocation: {} written, {} usable, {} failed, {} with annotation failure "
         "history, {} with decision failure history, {} skipped annotation",
         written,
         written - failed,
