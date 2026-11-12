@@ -108,6 +108,7 @@ class _PreparationProgress:
             total=total_records,
             initial=counts.records,
             desc="Preparing FineWeb",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [ETA {remaining}]",
             unit="record",
             position=0,
             dynamic_ncols=True,
@@ -471,6 +472,8 @@ def main(config: DictConfig) -> None:
         raise ValueError("MODEL_ENDPOINT and MODEL_TOKEN must be set")
     if not endpoint.endswith("/v1"):
         endpoint += "/v1"
+    logger.remove()
+    logger.add(lambda message: tqdm.write(message, end="", file=sys.stderr))
     prepare(args, endpoint + "/", token)
 
 
