@@ -42,7 +42,8 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
 
     batches = annotate_batches(rows(), annotate, take=4, shard_size=2, workers=2)
     first = next(batches)
-    assert consumed == ["first", "invalid"]
+    assert consumed[:2] == ["first", "invalid"]
+    assert len(consumed) <= 4
     assert first == [
         PreparedPassage(AnnotatedPassage("first", [])),
         PreparedPassage(AnnotatedPassage("invalid", None, [failure])),
@@ -58,6 +59,93 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
         ]
     ]
     assert consumed == ["first", "invalid", "third", "fourth"]
+
+
+def test_workers_continue_past_a_slow_shard_while_preserving_order():
+    third_finished = Event()
+
+    def annotate(passage):
+        if passage.text == "first":
+            assert third_finished.wait(5), "Next shard was blocked by the first shard"
+        elif passage.text == "third":
+            third_finished.set()
+        return PreparedPassage(AnnotatedPassage(passage.text, []))
+
+    batches = list(
+        annotate_batches(
+            [
+                {"text": text}
+                for text in ("first", "second", "third", "fourth", "fifth")
+            ],
+            annotate,
+            take=None,
+            shard_size=2,
+            workers=2,
+        )
+    )
+    assert [[item.passage.text for item in batch] for batch in batches] == [
+        ["first", "second"],
+        ["third", "fourth"],
+        ["fifth"],
+    ]
+
+
+def test_request_lookahead_is_bounded_and_closing_releases_the_source():
+    consumed = []
+    closed = Event()
+
+    def rows():
+        try:
+            for index in range(1000):
+                consumed.append(index)
+                yield {"text": str(index)}
+        finally:
+            closed.set()
+
+    batches = annotate_batches(
+        rows(),
+        lambda passage: PreparedPassage(AnnotatedPassage(passage.text, [])),
+        take=None,
+        shard_size=2,
+        workers=2,
+    )
+    try:
+        assert [item.passage.text for item in next(batches)] == ["0", "1"]
+        # One shard under construction plus a six-entry request/result window.
+        assert len(consumed) <= 8
+    finally:
+        batches.close()
+    assert closed.is_set()
+
+
+@pytest.mark.parametrize("failed_index", [2, 4])
+def test_later_failure_preserves_earlier_complete_shards(failed_index):
+    release_first = Event()
+
+    def annotate(passage):
+        index = int(passage.text)
+        if index == 0:
+            assert release_first.wait(5), "Later passages did not run concurrently"
+        elif index == failed_index:
+            raise RuntimeError("fatal annotation failure")
+        elif index == failed_index + 1:
+            # With the first worker blocked, this worker has already finished
+            # the failed future before it can release the first passage.
+            release_first.set()
+        return PreparedPassage(AnnotatedPassage(passage.text, []))
+
+    batches = annotate_batches(
+        [{"text": str(index)} for index in range(failed_index + 2)],
+        annotate,
+        take=None,
+        shard_size=2,
+        workers=2,
+    )
+    written = []
+    with pytest.raises(RuntimeError, match="fatal annotation failure"):
+        for batch in batches:
+            written.append([item.passage.text for item in batch])
+    assert written == ([["0", "1"]] if failed_index == 2 else [["0", "1"], ["2", "3"]])
 
 
 def test_concurrent_results_keep_input_order_with_a_partial_final_batch():

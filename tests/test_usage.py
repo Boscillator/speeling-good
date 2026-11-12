@@ -14,6 +14,7 @@ def test_usage_normalizes_stages_and_sums_only_reported_counts():
             "total_tokens": 120,
             "prompt_tokens_details": {"cached_tokens": 30},
             "completion_tokens_details": {"reasoning_tokens": 10},
+            "cost": 0.25,
         },
     )
     usage.record("annotation", {"input_tokens": 5, "output_tokens": 2})
@@ -24,22 +25,34 @@ def test_usage_normalizes_stages_and_sums_only_reported_counts():
             "input_tokens": 145,
             "output_tokens": 22,
             "total_tokens": 178,
+            "cached_tokens": 30,
+            "reasoning_tokens": 10,
+            "cost": 0.25,
             "responses": 4,
             "responses_without_usage": 0,
+            "responses_without_cost": 3,
         },
         "early_decision": {
             "input_tokens": 40,
             "output_tokens": 0,
             "total_tokens": 40,
+            "cached_tokens": 0,
+            "reasoning_tokens": 0,
+            "cost": 0.0,
             "responses": 1,
             "responses_without_usage": 0,
+            "responses_without_cost": 1,
         },
         "annotation": {
             "input_tokens": 105,
             "output_tokens": 22,
             "total_tokens": 138,
+            "cached_tokens": 30,
+            "reasoning_tokens": 10,
+            "cost": 0.25,
             "responses": 3,
             "responses_without_usage": 0,
+            "responses_without_cost": 2,
         },
     }
 
@@ -60,8 +73,12 @@ def test_missing_or_invalid_metadata_does_not_invent_token_counts():
         "input_tokens": 0,
         "output_tokens": 8,
         "total_tokens": 8,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost": 0.0,
         "responses": 6,
         "responses_without_usage": 4,
+        "responses_without_cost": 6,
     }
 
 
@@ -80,11 +97,25 @@ def test_concurrent_updates_are_not_lost_and_snapshots_remain_independent():
         "input_tokens": 6000,
         "output_tokens": 4000,
         "total_tokens": 10000,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost": 0.0,
         "responses": 2000,
         "responses_without_usage": 0,
+        "responses_without_cost": 2000,
     }
     assert usage.snapshot()["early_decision"]["responses"] == 1000
     assert usage.snapshot()["annotation"]["responses"] == 1000
     assert before["total"]["responses"] == 0
     before["annotation"]["input_tokens"] = 999
     assert usage.snapshot()["annotation"]["input_tokens"] == 3000
+
+
+def test_zero_cost_is_distinct_from_missing_or_invalid_cost():
+    usage = UsageTracker()
+    for cost in (None, True, -1, "0.1", float("nan"), float("inf"), 0, 0.125):
+        usage.record("annotation", {"cost": cost})
+    result = usage.snapshot()["annotation"]
+    assert result["cost"] == 0.125
+    assert result["responses_without_cost"] == 6
+    assert result["responses_without_usage"] == 8

@@ -54,7 +54,7 @@ class AnnotationFailure:
     """An invalid model response; attempt numbers start at one."""
 
     attempt: int
-    stage: Literal["decoding", "resolution"]
+    stage: Literal["decoding", "resolution", "transport"]
     error: str
     response: str | None
 

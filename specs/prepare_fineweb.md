@@ -87,10 +87,9 @@ it. Credentials are never written to the configuration or cache.
 
 ## Pipeline and sharding
 
-Load the dataset with `streaming=True` and read consecutive batches of at most
-`shard_size` entries. Check once that the dataset schema declares a string `text`
-field, then rely on that schema when reading rows. Joblib threads
-process each batch concurrently through shared decision and annotation providers,
+Load the dataset with `streaming=True`. Check once that the dataset schema declares a string `text`
+field, then rely on that schema when reading rows. A thread pool
+processes passages concurrently through shared decision and annotation providers,
 with at most `workers` active model requests. Each passage gets a decision first.
 Unknown decisions proceed to full annotation with their diagnostics retained.
 Clean decisions are independently sampled for full annotation using
@@ -98,7 +97,12 @@ Clean decisions are independently sampled for full annotation using
 Skipped clean passages remain in output with `annotations: []` and their decision.
 Sampling occurs outside both caches; no random seed or cross-run reproducibility
 is promised. The annotation model receives only the text, without the decision.
-Results retain input order, and only one batch is held in memory at a time.
+Results retain input order. Requests continue across shard boundaries, with a
+bounded window of `shard_size + 2 * workers` queued, active, or out-of-order results,
+plus the shard being assembled. An unusually slow passage can eventually fill
+this window and pause further submission, keeping memory bounded.
+Worker errors are retrieved in input order, so complete shards preceding a failed
+passage are yielded and written before the error stops processing.
 
 Write one `part-00000.jsonl`, `part-00001.jsonl`, etc. per input batch. Each line
 contains `text`, `annotations`, `failures`, `decision`, and
@@ -111,13 +115,21 @@ There is no per-passage skipped status. `decision` is null for unknowns, otherwi
 it contains `contains_spelling_error` and native `confidence`. Early-decision
 diagnostics retain attempts, errors and raw responses separately from annotation
 failures. Annotation failure records retain attempt numbers, decoding/resolution
-stages, errors, and raw response content. Transport
+stages, errors, and raw response content. Exhausted transient annotation transport
+errors retain the best partial result and diagnostics, or `annotations: null` if
+none is usable. Nonretryable HTTP errors, early-decision transport exhaustion,
 and other unexpected errors stop processing with a nonzero exit status.
 
 Write the resolved application configuration and normalized endpoint to
 `config.yaml` beside the shards. Log per-shard and final counts of written passages, usable results,
 failed results, passages with annotation or decision failure history (including
 recovered results), and skipped annotations.
+`usage.json` sums reported input, output, total, cached, and reasoning tokens,
+response counts, reported cost, and responses missing token or cost metadata,
+separately per stage and overall. Cached and reasoning tokens are subsets of the
+token totals. Missing costs are not estimated or treated as known zero charges.
+Because requests overlap shard writes, usage snapshots can include responses for
+passages in later shards; the final snapshot includes all completed responses.
 Each completed file replaces its destination atomically. Every invocation requires
 a new output directory; an existing directory raises `FileExistsError` before
 loading data. An interrupted run may leave completed shards and requires a new

@@ -39,7 +39,11 @@ is controlled separately by the constructor argument `max_inflight=4`.
 ## Retries, caching and parallelism
 - The client retries invalid output and transient connection/HTTP failures within
   `max_attempts`, including the initial request. Invalid output receives validation
-  feedback. Other HTTP errors fail immediately; transport exhaustion still raises.
+  feedback together with the rejected assistant response. Other HTTP errors fail
+  immediately. Transient transport exhaustion returns the best partial result,
+  or `annotations=None` if none was obtained, and retains transport diagnostics.
+  A `length` finish reason stops retries immediately: repeating the same capped
+  request would risk paying for another truncated response.
 - Caching belongs to the preparation CLI; the provider does not cache results.
 - The client should expect to be called from multiple python threads. Furthermore, it should limit the number
   of inflight requests to a configurable number.
@@ -51,11 +55,11 @@ Every result preserves the input `decision` and copies its diagnostics to
 passage text is sent to the model; early judgments do not influence its prompt.
 
 `AnnotatedPassage.failures` defaults to an empty list. Each `AnnotationFailure`
-contains the 1-based request attempt, stage (`decoding` or `resolution`), diagnostic
+contains the 1-based request attempt, stage (`decoding`, `resolution`, or `transport`), diagnostic
 `error`, and full raw model `response` content when available. Diagnostics identify
 invalid correction indices and fields, missing or ambiguous context, unchanged or
 empty edits, and duplicate or overlapping spans. Refusal text and unexpected finish
-reasons are also retained. Transport errors are not added to this history.
+reasons are also retained. Transport errors have no model response content.
 
 Decode and validate entries independently when the JSON envelope is valid. Resolve
 valid corrections independently, excluding every correction involved in a duplicate

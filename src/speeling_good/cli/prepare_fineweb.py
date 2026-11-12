@@ -4,8 +4,10 @@ import json
 import os
 import random
 import sys
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from collections import deque
+from collections.abc import Callable, Generator, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import asdict, dataclass
 from itertools import islice
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import IO, Annotated, cast
 import hydra
 import yaml
 from datasets import Value, load_dataset
-from joblib import Memory, Parallel, delayed
+from joblib import Memory
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from openai import OpenAI
@@ -37,7 +39,7 @@ from speeling_good.preprocessing.types import (
 from speeling_good.preprocessing.usage import UsageTracker
 
 # Bump when resolution rules or output types change; prompts are hashed directly.
-ANNOTATION_CACHE_VERSION = 3
+ANNOTATION_CACHE_VERSION = 4
 EARLY_DECISION_CACHE_VERSION = 1
 
 
@@ -118,6 +120,30 @@ def should_annotate(
     )
 
 
+def _annotate_in_order(
+    passages: Iterable[RawPassage],
+    annotate: Callable[[RawPassage], PreparedPassage],
+    *,
+    workers: int,
+    window: int,
+) -> Generator[PreparedPassage]:
+    """Run bounded concurrent requests, retrieving results and errors in order."""
+    source = iter(passages)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending = deque()
+        try:
+            for passage in islice(source, window):
+                pending.append(executor.submit(annotate, passage))
+            while pending:
+                yield pending.popleft().result()
+                passage = next(source, None)
+                if passage is not None:
+                    pending.append(executor.submit(annotate, passage))
+        finally:
+            for future in pending:
+                future.cancel()
+
+
 def annotate_batches(
     rows: Iterable[Mapping[str, object]],
     annotate: Callable[[RawPassage], PreparedPassage],
@@ -125,18 +151,22 @@ def annotate_batches(
     take: int | None,
     shard_size: int,
     workers: int,
-) -> Iterator[list[PreparedPassage]]:
-    """Annotate schema-validated rows, retaining partial and failed results."""
-
-    def annotate_row(row: Mapping[str, object]) -> PreparedPassage:
-        return annotate(RawPassage(cast(str, row["text"])))
+) -> Generator[list[PreparedPassage]]:
+    """Keep a bounded request window running across ordered shard boundaries."""
 
     source = iter(rows)
     try:
-        limited = islice(source, take)
-        with Parallel(n_jobs=workers, backend="threading", batch_size=1) as parallel:
-            while batch := list(islice(limited, shard_size)):
-                yield parallel(delayed(annotate_row)(row) for row in batch)
+        passages = (RawPassage(cast(str, row["text"])) for row in islice(source, take))
+        with closing(
+            _annotate_in_order(
+                passages,
+                annotate,
+                workers=workers,
+                window=shard_size + 2 * workers,
+            )
+        ) as results:
+            while batch := list(islice(results, shard_size)):
+                yield batch
     finally:
         # A take limit leaves streaming generators suspended inside file readers.
         if isinstance(source, Generator):

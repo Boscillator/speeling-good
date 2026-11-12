@@ -238,7 +238,8 @@ class LlmAnnotationProvider:
     Context is matched exactly; ambiguous, missing, duplicate, or overlapping spans
     retry the entire passage with validation feedback. Invalid responses are retained
     in the result. Exhaustion returns the best partial annotations (latest on ties),
-    or None if none are usable. Transport exhaustion raises the last SDK exception.
+    or None if none are usable, including on transient transport exhaustion.
+    Token-limit exhaustion returns immediately rather than repeating a capped call.
     The caller owns the supplied client and its underlying connection pool.
     """
 
@@ -272,7 +273,22 @@ class LlmAnnotationProvider:
             try:
                 completion = self._request_completion(messages)
             except (APIConnectionError, APIStatusError) as error:
-                self._retry_or_raise(error, attempt)
+                if isinstance(error, APIStatusError) and not (
+                    error.status_code in (408, 409, 429) or error.status_code >= 500
+                ):
+                    raise
+                failures.append(
+                    AnnotationFailure(attempt + 1, "transport", str(error), None)
+                )
+                if attempt + 1 == self._config.max_attempts:
+                    logger.warning(
+                        "Annotation transport exhausted {} attempts; retaining {} annotations: {}",
+                        attempt + 1,
+                        len(best or []),
+                        error,
+                    )
+                    break
+                self._wait_before_retry(error, attempt)
                 continue
             if self._usage is not None:
                 self._usage.record(
@@ -284,39 +300,43 @@ class LlmAnnotationProvider:
             result = _evaluate_response(passage.text, completion, attempt + 1)
             failures.extend(result.failures)
             if not result.failures:
-                return AnnotatedPassage(
-                    passage.text,
-                    result.annotations,
-                    failures,
-                    decision=passage.decision,
-                    early_decision_failures=passage.failures,
-                )
+                best = result.annotations
+                break
             if result.annotations and (
                 best is None or len(result.annotations) >= len(best)
             ):
                 best = result.annotations
             feedback = "; ".join(failure.error for failure in result.failures)
+            if completion.choices and completion.choices[0].finish_reason == "length":
+                logger.warning(
+                    "Annotation hit the completion token limit; retaining {} annotations",
+                    len(best or []),
+                )
+                break
             if attempt + 1 == self._config.max_attempts:
                 logger.warning(
                     "Annotation exhausted {} attempts; retaining {} annotations",
                     attempt + 1,
                     len(best or []),
                 )
-                return AnnotatedPassage(
-                    passage.text,
-                    best,
-                    failures,
-                    decision=passage.decision,
-                    early_decision_failures=passage.failures,
-                )
+                break
+            content = result.failures[0].response
+            if content is not None:
+                messages.append({"role": "assistant", "content": content})
             messages.append(
                 {
                     "role": "user",
                     "content": f"Validation failed: {feedback}. Try again.",
                 }
             )
-            self._retry_or_raise(AnnotationError(feedback), attempt)
-        raise AssertionError("Unreachable: max_attempts is positive")
+            self._wait_before_retry(AnnotationError(feedback), attempt)
+        return AnnotatedPassage(
+            passage.text,
+            best,
+            failures,
+            decision=passage.decision,
+            early_decision_failures=passage.failures,
+        )
 
     def _request_completion(
         self, messages: list[ChatCompletionMessageParam]
@@ -353,21 +373,12 @@ class LlmAnnotationProvider:
                 ),
             )
 
-    def _retry_or_raise(
+    def _wait_before_retry(
         self,
         error: AnnotationError | APIConnectionError | APIStatusError,
         attempt: int,
     ) -> None:
-        """Apply the retry policy and wait without occupying a request slot."""
-        if isinstance(error, APIStatusError) and not (
-            error.status_code in (408, 409, 429) or error.status_code >= 500
-        ):
-            logger.error("Annotation request failed ({})", type(error).__name__)
-            raise error
-        if attempt + 1 == self._config.max_attempts:
-            logger.error("Annotation failed after {} attempts ({})", attempt + 1, error)
-            raise error
-
+        """Wait before another attempt without occupying a request slot."""
         delay = _retry_delay(attempt, error)
         logger.warning(
             "Annotation attempt {}/{} failed ({}); retrying in {:.2f}s",

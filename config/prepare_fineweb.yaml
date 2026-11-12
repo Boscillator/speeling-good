@@ -8,10 +8,10 @@ dataset: HuggingFaceFW/fineweb
 subset: sample-10BT
 split: train
 # null removes the input limit.
-take: 100
+take: 1000
 output: data/fineweb
-workers: 2
-shard_size: 10
+workers: 8
+shard_size: 100
 p_annotated_anyway: 1.0
 # Send every passage directly to annotation without decision requests or caching.
 skip_early_decision: true

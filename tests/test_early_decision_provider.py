@@ -85,8 +85,12 @@ def test_usage_includes_invalid_decisions_and_missing_metadata_on_retries(
         "input_tokens": 80,
         "output_tokens": 0,
         "total_tokens": 80,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost": 0.0,
         "responses": 3,
         "responses_without_usage": 1,
+        "responses_without_cost": 3,
     }
 
 

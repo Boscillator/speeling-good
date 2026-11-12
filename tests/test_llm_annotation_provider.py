@@ -4,7 +4,7 @@ from threading import Event, Lock
 
 import httpx2 as httpx
 import pytest
-from openai import AuthenticationError, OpenAI, RateLimitError
+from openai import AuthenticationError, OpenAI
 
 from speeling_good.preprocessing.llm_annotation_provider import (
     AnnotationConfig,
@@ -121,6 +121,9 @@ def test_usage_counts_invalid_output_but_not_transport_failures(make_provider):
         "prompt_tokens": 100,
         "completion_tokens": 20,
         "total_tokens": 120,
+        "cost": 0.125,
+        "prompt_tokens_details": {"cached_tokens": 40},
+        "completion_tokens_details": {"reasoning_tokens": 5},
     }
     responses = iter(
         [
@@ -138,8 +141,12 @@ def test_usage_counts_invalid_output_but_not_transport_failures(make_provider):
         "input_tokens": 100,
         "output_tokens": 20,
         "total_tokens": 120,
+        "cached_tokens": 40,
+        "reasoning_tokens": 5,
+        "cost": 0.125,
         "responses": 2,
         "responses_without_usage": 1,
+        "responses_without_cost": 1,
     }
 
 
@@ -186,6 +193,10 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
     assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
     assert len(calls) == 2
     assert "Validation failed" in calls[1]["messages"][-1]["content"]
+    assert calls[1]["messages"][-2] == {
+        "role": "assistant",
+        "content": response(bad).json()["choices"][0]["message"]["content"],
+    }
     assert result.failures
     assert all(failure.attempt == 1 for failure in result.failures)
     assert all(
@@ -296,7 +307,8 @@ def test_transient_http_failure_recovers(make_provider, status):
     )
     assert result.annotations == []
     assert len(calls) == 2
-    assert result.failures == []
+    assert len(result.failures) == 1
+    assert result.failures[0].stage == "transport"
 
 
 def test_connection_failure_recovers(make_provider):
@@ -320,7 +332,6 @@ def test_connection_failure_recovers(make_provider):
 @pytest.mark.parametrize(
     "finish_reason,refusal",
     [
-        ("length", None),
         ("content_filter", None),
         ("stop", "Cannot comply"),
     ],
@@ -490,7 +501,6 @@ def test_retry_after_controls_backoff(
     "status,exception,attempts",
     [
         (401, AuthenticationError, 1),
-        (429, RateLimitError, 3),
     ],
 )
 def test_http_failure_preserves_error_and_request_budget(
@@ -505,6 +515,58 @@ def test_http_failure_preserves_error_and_request_budget(
     with pytest.raises(exception):
         make_provider(handler).annotate(PassageWithEarlyDecision("Hello", None))
     assert len(calls) == attempts
+
+
+@pytest.mark.parametrize("status", [None, 429, 503])
+@pytest.mark.parametrize("partial", [False, True])
+def test_transport_exhaustion_retains_partial_results_and_diagnostics(
+    make_provider, status, partial
+):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if partial and len(calls) == 1:
+            return response([correction("teh", "the"), correction("absent", "word")])
+        if status is None:
+            raise httpx.ConnectError("unavailable", request=request)
+        return httpx.Response(status, json={"error": {"message": "unavailable"}})
+
+    decision = EarlyDecision(True, 0.9)
+    result = make_provider(handler, max_attempts=3).annotate(
+        PassageWithEarlyDecision("teh cat", decision)
+    )
+    assert len(calls) == 3
+    assert result.annotations == (
+        [SpellingAnnotation("teh", "the", 0, 3)] if partial else None
+    )
+    assert result.decision == decision
+    assert [failure.attempt for failure in result.failures] == [1, 2, 3]
+    assert result.failures[-1].stage == "transport"
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_token_limit_stops_repeated_capped_calls_and_preserves_best_result(
+    make_provider, partial
+):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        if partial and len(calls) == 1:
+            return response([correction("teh", "the"), correction("absent", "word")])
+        data = response('{"corrections": [').json()
+        data["choices"][0]["finish_reason"] = "length"
+        return httpx.Response(200, json=data)
+
+    result = make_provider(handler, max_completion_tokens=256).annotate(
+        PassageWithEarlyDecision("teh cat", None)
+    )
+    assert len(calls) == (2 if partial else 1)
+    assert result.annotations == (
+        [SpellingAnnotation("teh", "the", 0, 3)] if partial else None
+    )
+    assert "length" in result.failures[-1].error
 
 
 def test_shared_provider_limits_active_requests_and_keeps_results_separate(
