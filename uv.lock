@@ -2008,6 +2008,7 @@ dependencies = [
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -2031,6 +2032,7 @@ requires-dist = [
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "torch", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "tqdm", specifier = ">=4.70.1" },
 ]
 
 [package.metadata.requires-dev]
