@@ -60,6 +60,11 @@ readability is the reason to change the structure, not to weaken the rules.
 Prefix unused parameters with an underscore and document why they are needed.
 If an unused parameter must keep its name, document that reason too.
 
+For ordered matching, prefer an explicit advancing index over a nested
+next/generator search when it makes progress and boundary handling easier to
+follow. Use an indexable input when needed, while retaining iterator-based code
+when traversal state or random access would add complexity without helping.
+
 ### Test pure business logic directly
 
 A pure function that performs meaningful decisions, matching, transformations, or
@@ -86,6 +91,13 @@ failure at a clear boundary in the actual data flow.
 For example, validate shared schema invariants once at the dataset or service
 boundary, then trust them in per-item processing. Let built-in exceptions surface
 broken upstream invariants unless translation adds useful context.
+
+Keep input types aligned with accepted values: if None is always an error, omit
+it from the type rather than accepting it only to reject it at runtime. Retain
+optional types when absence is meaningful or handling it is a boundary's job.
+Trust structural guarantees from established libraries, such as ordered offsets,
+instead of validating hypothetical violations on each item. Keep validation for
+untrusted inputs or invariants the provider does not guarantee.
 
 When a simple precondition such as requiring a new output directory suffices,
 prefer it over inspecting and reconciling individual artifacts. Add resume or
