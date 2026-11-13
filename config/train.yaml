@@ -22,7 +22,7 @@ model:
   warmup_ratio: 0.1
   gradient_checkpointing: true
   # Multiplier for every supervised token in originally clean passages.
-  clean_passage_weight: 1.0
+  clean_passage_weight: 0.2
 early_stopping:
   enabled: true
   # Counts validation checks without improvement, not training epochs.
