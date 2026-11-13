@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 prepare-fineweb = "speeling_good.cli.prepare_fineweb:main"
+review-corrections = "speeling_good.cli.review_corrections:main"
 train-discriminator = "speeling_good.cli.train:main"
 
 [build-system]

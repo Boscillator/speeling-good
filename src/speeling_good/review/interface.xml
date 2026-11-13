@@ -1,0 +1,40 @@
+<View>
+  <Header value="Original passage"/>
+  <HyperText name="highlight" value="$highlighted"/>
+  <Header value="Span correct?"/>
+  <Choices name="span" toName="passage" choice="single" required="true">
+    <Choice value="correct"/><Choice value="incorrect"/><Choice value="unsure"/>
+  </Choices>
+  <View visibleWhen="choice-selected" whenTagName="span" whenChoiceValue="incorrect">
+    <Header value="Select the corrected span below (one region only)."/>
+    <Labels name="correct_span" toName="passage" maxUsages="1"><Label value="corrected_span"/></Labels>
+    <Text name="passage" value="$text" granularity="symbol"/>
+  </View>
+  <Header value="Original text"/><Text name="original" value="$original"/>
+  <Header value="Proposed replacement"/><Text name="replacement_text" value="$replacement"/>
+  <Header value="Inclusion?"/>
+  <Choices name="inclusion" toName="passage" choice="single" required="true">
+    <Choice value="in_scope"/><Choice value="outside_scope"/><Choice value="not_an_error"/><Choice value="unsure"/>
+  </Choices>
+  <View visibleWhen="choice-selected" whenTagName="inclusion" whenChoiceValue="in_scope">
+    <Header value="Proposed replacement correct?"/>
+    <Choices name="replacement" toName="passage" choice="single" required="true">
+      <Choice value="correct"/><Choice value="incorrect"/><Choice value="unsure"/>
+    </Choices>
+    <View visibleWhen="choice-selected" whenTagName="replacement" whenChoiceValue="incorrect">
+      <TextArea name="correct_replacement" toName="passage" rows="2" maxSubmissions="1"/>
+      <Choices name="delete_replacement" toName="passage" choice="single"><Choice value="delete"/></Choices>
+    </View>
+  </View>
+  <Header value="Predicted correction type"/><Text name="predicted_type" value="$predicted_type"/>
+  <Header value="Predicted type correct?"/>
+  <Choices name="type" toName="passage" choice="single" required="true">
+    <Choice value="correct"/><Choice value="incorrect"/><Choice value="unsure"/>
+  </Choices>
+  <View visibleWhen="choice-selected" whenTagName="type" whenChoiceValue="incorrect">
+    <Choices name="correct_type" toName="passage" choice="single" required="true">
+      <!-- CORRECTION_TYPES -->
+    </Choices>
+  </View>
+  <Header value="Optional notes"/><TextArea name="notes" toName="passage" rows="3" maxSubmissions="1"/>
+</View>
