@@ -28,6 +28,13 @@ model:
   weight_decay: 0.01
   warmup_ratio: 0.1
   gradient_checkpointing: false
+  # Multiplier for every supervised token in originally clean passages.
+  clean_passage_weight: 1.0
+early_stopping:
+  enabled: true
+  # Counts validation checks without improvement, not training epochs.
+  patience: 3
+  min_delta: 0.0
 data:
   directory: data/fineweb
   validation_fraction: 0.2

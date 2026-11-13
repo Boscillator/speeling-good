@@ -12,6 +12,7 @@ from torch.utils.data import Dataset as TorchDataset
 from transformers import DataCollatorForTokenClassification, PreTrainedTokenizerFast
 
 from speeling_good.dataloaders import prepare_dataset
+from speeling_good.dataloaders.token_classification import ValidationCollator
 
 
 @pytest.fixture
@@ -85,8 +86,59 @@ def test_unicode_subwords_truncation_and_batch_padding(tokenizer):
         [-100, 0, -100, -100, -100, -100],
     ]
     assert batch["attention_mask"].tolist() == [[1] * 6, [1, 1, 1, 0, 0, 0]]
-    assert set(batch) <= {"input_ids", "attention_mask", "token_type_ids", "labels"}
-    assert all(tensor.dtype == torch.long for tensor in batch.values())
+    assert batch["is_clean"].tolist() == [False, True]
+    assert batch["is_clean"].dtype == torch.bool
+    assert set(batch) <= {
+        "input_ids",
+        "attention_mask",
+        "token_type_ids",
+        "labels",
+        "is_clean",
+    }
+    assert all(
+        tensor.dtype == torch.long for key, tensor in batch.items() if key != "is_clean"
+    )
+
+
+@pytest.mark.parametrize("validation", [False, True])
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_cleanliness_uses_original_annotations_before_truncation(
+    tokenizer, validation, padding_side
+):
+    tokenizer.padding_side = padding_side
+    rows = Dataset.from_list(
+        [
+            {
+                "text": "okay okay speling",
+                "annotations": [
+                    {
+                        "original": "speling",
+                        "corrected": "spelling",
+                        "span_start": 10,
+                        "span_end": 17,
+                    }
+                ],
+            },
+            {"text": "okay", "annotations": []},
+        ]
+    )
+    dataset = prepare_dataset(
+        rows, tokenizer, max_length=4, include_metadata=validation
+    )
+    if validation:
+        dataset = dataset.add_column("passage_index", [0, 1])
+    collator = (
+        ValidationCollator(tokenizer)
+        if validation
+        else DataCollatorForTokenClassification(tokenizer)
+    )
+    batch = collator(list(dataset))
+
+    assert batch["is_clean"].tolist() == [False, True]
+    assert batch["is_clean"].dtype == torch.bool
+    assert batch["labels"][batch["labels"] != -100].tolist() == [0, 0, 0]
+    if validation:
+        assert [item["text"] for item in batch["metadata"]] == rows["text"]
 
 
 def test_failed_annotations_are_excluded_but_clean_and_partial_rows_remain(tokenizer):

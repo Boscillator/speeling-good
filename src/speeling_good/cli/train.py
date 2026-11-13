@@ -9,7 +9,11 @@ from uuid import uuid4
 import hydra
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from lightning.pytorch.loggers import WandbLogger
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
@@ -32,6 +36,7 @@ class ModelConfig(BaseModel):
     weight_decay: Annotated[float, Field(ge=0)] = 0.01
     warmup_ratio: Annotated[float, Field(ge=0, le=1)] = 0.1
     gradient_checkpointing: bool = False
+    clean_passage_weight: Annotated[float, Field(ge=0, le=1)] = 1.0
 
 
 class DataConfig(BaseModel):
@@ -59,6 +64,13 @@ class TrainerConfig(BaseModel):
     fast_dev_run: bool = False
 
 
+class EarlyStoppingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = True
+    patience: Annotated[int, Field(strict=True, ge=0)] = 3
+    min_delta: Annotated[float, Field(ge=0)] = 0.0
+
+
 class WandbConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project: Annotated[str, Field(min_length=1)] = "speeling-good"
@@ -74,6 +86,7 @@ class TrainConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
+    early_stopping: EarlyStoppingConfig = Field(default_factory=EarlyStoppingConfig)
     wandb: WandbConfig = Field(default_factory=WandbConfig)
 
 
@@ -139,6 +152,16 @@ def train(config: TrainConfig) -> L.Trainer:
     else:
         model = SpeelingGood(**config.model.model_dump())
     callbacks: list[L.Callback] = [checkpoint]
+    if config.early_stopping.enabled:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val/loss",
+                mode="min",
+                patience=config.early_stopping.patience,
+                min_delta=config.early_stopping.min_delta,
+                check_on_train_epoch_end=False,
+            )
+        )
     if not config.trainer.fast_dev_run:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     with tracking_run(config, run_dir, run_id) as run_logger:
@@ -153,6 +176,12 @@ def train(config: TrainConfig) -> L.Trainer:
             train_dataloaders=train_loader,
             val_dataloaders=validation_loader,
             ckpt_path=config.resume_from,
+        )
+    if trainer.should_stop and config.early_stopping.enabled:
+        logger.info(
+            "Early stopping triggered at epoch {}, step {}",
+            trainer.current_epoch,
+            trainer.global_step,
         )
     logger.info(
         "Run artifacts: {}; best checkpoint: {}",

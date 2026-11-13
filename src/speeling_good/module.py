@@ -7,6 +7,7 @@ import torch
 import wandb
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.types import OptimizerLRScheduler
+from torch.nn import functional as F
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
     BinaryF1Score,
@@ -28,6 +29,24 @@ from speeling_good.evaluation import (
 from speeling_good.models import SpeelingGoodDescriminator
 
 
+def passage_weighted_cross_entropy(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    is_clean: torch.Tensor,
+    clean_passage_weight: float,
+) -> torch.Tensor:
+    """Scale clean-passage token losses and average over supervised tokens.
+
+    Cleanliness comes from original annotations, before truncation. Ignored
+    labels (-100) contribute neither loss nor tokens to the denominator.
+    """
+    token_losses = F.cross_entropy(
+        logits.float().transpose(1, 2), labels, reduction="none", ignore_index=-100
+    )
+    weights = torch.where(is_clean, clean_passage_weight, 1.0)
+    return (token_losses * weights[:, None]).sum() / (labels != -100).sum().clamp_min(1)
+
+
 class SpeelingGood(L.LightningModule):
     """Fine-tune ModernBERT; B/I mark errors and O marks clean tokens.
 
@@ -44,12 +63,15 @@ class SpeelingGood(L.LightningModule):
         warmup_ratio: float = 0.1,
         gradient_checkpointing: bool = False,
         backbone_config: dict[str, Any] | None = None,
+        clean_passage_weight: float = 1.0,
     ) -> None:
         super().__init__()
         if learning_rate <= 0 or weight_decay < 0 or not 0 <= warmup_ratio <= 1:
             raise ValueError(
                 "Require learning_rate > 0, weight_decay >= 0, warmup_ratio in [0, 1]"
             )
+        if not 0 <= clean_passage_weight <= 1:
+            raise ValueError("Require clean_passage_weight in [0, 1]")
         self.discriminator = SpeelingGoodDescriminator(
             model_name=model_name, backbone_config=backbone_config
         )
@@ -81,14 +103,30 @@ class SpeelingGood(L.LightningModule):
     def forward(self, **inputs: torch.Tensor) -> TokenClassifierOutput:
         return self.discriminator(**inputs)
 
+    def _batch_output(self, batch: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        output = self(
+            **{
+                key: value
+                for key, value in batch.items()
+                if key not in {"metadata", "labels", "is_clean"}
+            }
+        )
+        assert output.logits is not None
+        loss = passage_weighted_cross_entropy(
+            output.logits,
+            batch["labels"],
+            batch["is_clean"],
+            self.hparams["clean_passage_weight"],
+        )
+        return output.logits, loss
+
     def training_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
-        output = self(**batch)
-        loss = output.loss
+        logits, loss = self._batch_output(batch)
         mask = batch["labels"] != -100
         self.training_metrics.update(
-            output.logits.detach().argmax(dim=-1)[mask] != 0, batch["labels"][mask] != 0
+            logits.detach().argmax(dim=-1)[mask] != 0, batch["labels"][mask] != 0
         )
         self.log_dict(self.training_metrics, on_step=False, on_epoch=True)
         self.log(
@@ -102,15 +140,13 @@ class SpeelingGood(L.LightningModule):
         return loss
 
     def validation_step(self, batch: dict[str, Any], batch_idx: int) -> None:
-        output = self(
-            **{key: value for key, value in batch.items() if key != "metadata"}
-        )
+        logits, loss = self._batch_output(batch)
         mask = batch["labels"] != -100
         labels = batch["labels"][mask]
-        predictions = output.logits.argmax(dim=-1)[mask]
+        predictions = logits.argmax(dim=-1)[mask]
         self.log(
             "val/loss",
-            output.loss,
+            loss,
             on_epoch=True,
             batch_size=labels.numel(),
             sync_dist=True,
@@ -123,11 +159,11 @@ class SpeelingGood(L.LightningModule):
         ):
             self.validation_metrics[name].update(predictions != 0, labels != 0)
         self.log_dict(self.validation_metrics, on_epoch=True)
-        probabilities = output.logits.detach().float().softmax(dim=-1)
+        probabilities = logits.detach().float().softmax(dim=-1)
         self.token_pr_curve.update(
             probabilities[..., 1:].sum(dim=-1)[mask], (labels != 0).long()
         )
-        batch_predictions = output.logits.detach().argmax(dim=-1).cpu().tolist()
+        batch_predictions = logits.detach().argmax(dim=-1).cpu().tolist()
         for prediction, target, metadata in zip(
             batch_predictions,
             batch["labels"].cpu().tolist(),

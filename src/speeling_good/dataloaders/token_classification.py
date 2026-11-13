@@ -14,7 +14,9 @@ Example::
     model = AutoModelForTokenClassification.from_pretrained(
         checkpoint, num_labels=3, id2label=ID2LABEL, label2id=LABEL2ID
     )
-    loss = model(**next(iter(loader))).loss
+    batch = next(iter(loader))
+    batch.pop("is_clean")
+    loss = model(**batch).loss
 """
 
 from pathlib import Path
@@ -46,7 +48,8 @@ def prepare_dataset(
     Only text and annotations are consumed. Empty annotation lists represent
     clean passages; null annotations, blank text, and duplicate passages are
     excluded. Long passages are truncated; unsupervised passages are excluded.
-    The returned dataset contains unpadded model inputs and BIO label IDs.
+    The returned dataset contains unpadded model inputs, BIO label IDs, and an
+    is_clean flag derived from the original annotations before truncation.
     include_metadata retains text and character offsets for validation reporting.
     """
     if not tokenizer.is_fast:
@@ -92,6 +95,7 @@ def prepare_dataset(
         )
         offsets = encoding.pop("offset_mapping")
         masks = encoding.pop("special_tokens_mask")
+        encoding["is_clean"] = [not annotations for annotations in batch["annotations"]]
         encoding["labels"] = [
             annotation_to_bio(
                 passage_offsets,
