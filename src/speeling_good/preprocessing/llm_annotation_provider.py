@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
+    CorrectionType,
     PassageWithEarlyDecision,
     SpellingAnnotation,
 )
@@ -65,6 +66,21 @@ class Correction(BaseModel):
     correction: str
     before: str
     after: str
+    correction_type: CorrectionType = Field(
+        strict=False,
+        description=(
+            "Classify the edit itself: spelling = nonword typo; word_split = "
+            "accidental word join or split; doubled_word = removal of an accidentally "
+            "repeated adjacent word; hyphenation = hyphen insertion, removal, or "
+            "placement in a word or compound; wrong_word = real-word substitution, "
+            "including homophones; "
+            "inflection = tense, number, or other word-form change; apostrophe = "
+            "apostrophe insertion/removal/placement; punctuation = other punctuation; "
+            "grammar = other syntax or agreement repair; style = optional wording, "
+            "register, or capitalization preference; other = none of these. "
+            "Choose the most specific applicable category."
+        ),
+    )
 
 
 class Corrections(BaseModel):
@@ -97,7 +113,11 @@ def _resolve_correction(text: str, item: Correction) -> SpellingAnnotation:
         raise AnnotationError(f"exact context {context!r} is ambiguous; extend it")
     start = match + len(item.before)
     return SpellingAnnotation(
-        item.original, item.correction, start, start + len(item.original)
+        item.original,
+        item.correction,
+        start,
+        start + len(item.original),
+        item.correction_type,
     )
 
 

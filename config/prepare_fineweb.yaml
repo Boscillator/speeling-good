@@ -53,6 +53,17 @@ annotation:
     must differ. For an original that occurs only once, use before="" and after="".
     Otherwise copy only enough adjacent characters verbatim (including whitespace) so
     before+original+after occurs exactly once. No duplicate or overlapping edits.
+    Include correction_type for each edit, classifying the actual change rather than
+    assuming every proposal is a spelling correction. Use spelling for nonword typos;
+    word_split for accidental word joins/splits; doubled_word for removing an
+    accidentally repeated adjacent word; hyphenation for hyphen insertion, removal,
+    or placement in a word or compound; wrong_word for real-word substitutions including
+    homophones; inflection for tense, number, or other word-form changes; apostrophe
+    for apostrophe insertion, removal, or placement; punctuation for other punctuation;
+    grammar for other syntax or agreement repairs; style for optional wording,
+    register, or capitalization preferences; other when none applies. Choose the
+    most specific applicable category. These labels do not expand the spelling-only
+    detection policy above.
 
 hydra:
   run:

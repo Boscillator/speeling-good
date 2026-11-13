@@ -1,7 +1,7 @@
 import pytest
 
 from speeling_good.dataloaders.annotation_to_bio import annotation_to_bio
-from speeling_good.preprocessing.types import SpellingAnnotation
+from speeling_good.preprocessing.types import CorrectionType, SpellingAnnotation
 
 
 @pytest.mark.parametrize(
@@ -52,7 +52,12 @@ from speeling_good.preprocessing.types import SpellingAnnotation
     ],
 )
 def test_align_error_spans(offsets, spans, expected):
-    annotations = [SpellingAnnotation("teh", "the", start, end) for start, end in spans]
+    annotations = [
+        SpellingAnnotation(
+            "teh", "the", start, end, correction_type=CorrectionType.SPELLING
+        )
+        for start, end in spans
+    ]
     original_annotations = annotations.copy()
     original_offsets = offsets.copy()
 
@@ -66,8 +71,16 @@ def test_unicode_code_point_offsets_and_combining_marks():
     accent = text.index("\u0301")
     error = text.index("speling")
     annotations = [
-        SpellingAnnotation("\u0301", "", accent, accent + 1),
-        SpellingAnnotation("speling", "spelling", error, len(text)),
+        SpellingAnnotation(
+            "\u0301", "", accent, accent + 1, correction_type=CorrectionType.SPELLING
+        ),
+        SpellingAnnotation(
+            "speling",
+            "spelling",
+            error,
+            len(text),
+            correction_type=CorrectionType.SPELLING,
+        ),
     ]
     offsets = [
         (0, 1),
@@ -86,7 +99,10 @@ def test_unicode_code_point_offsets_and_combining_marks():
 def test_ignore_special_tokens_with_nonempty_offsets_and_padding(spans, expected):
     offsets = [(0, 2), (0, 2), (2, 5), (0, 0)]
     annotations = [
-        SpellingAnnotation("wrng", "wrong", start, end) for start, end in spans
+        SpellingAnnotation(
+            "wrng", "wrong", start, end, correction_type=CorrectionType.SPELLING
+        )
+        for start, end in spans
     ]
 
     assert (
@@ -98,7 +114,14 @@ def test_ignore_special_tokens_with_nonempty_offsets_and_padding(spans, expected
 @pytest.mark.parametrize("span", [(-1, 3), (3, 2), (2, 2)])
 def test_invalid_annotation_spans(span):
     with pytest.raises(ValueError, match="annotation span"):
-        annotation_to_bio([(0, 4)], [SpellingAnnotation("teh", "the", *span)])
+        annotation_to_bio(
+            [(0, 4)],
+            [
+                SpellingAnnotation(
+                    "teh", "the", *span, correction_type=CorrectionType.SPELLING
+                )
+            ],
+        )
 
 
 def test_mask_length_must_match_tokens():

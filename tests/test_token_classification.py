@@ -60,12 +60,14 @@ def test_unicode_subwords_chunking_and_batch_padding(tokenizer):
                         "corrected": "spelling",
                         "span_start": 2,
                         "span_end": 9,
+                        "correction_type": "spelling",
                     },
                     {
                         "original": "tail",
                         "corrected": "tale",
                         "span_start": 15,
                         "span_end": 19,
+                        "correction_type": "spelling",
                     },
                 ],
             },
@@ -127,6 +129,7 @@ def test_cleanliness_and_metadata_follow_chunks(tokenizer, validation, padding_s
                         "corrected": "spelling",
                         "span_start": 10,
                         "span_end": 17,
+                        "correction_type": "spelling",
                     }
                 ],
             },
@@ -179,6 +182,7 @@ def test_failed_annotations_are_excluded_but_clean_and_partial_rows_remain(token
                         "corrected": "spelling",
                         "span_start": 0,
                         "span_end": 7,
+                        "correction_type": "spelling",
                     }
                 ],
                 "failures": ["earlier attempt failed"],
@@ -234,6 +238,7 @@ def test_chunk_boundary_keeps_multi_token_word_together(tokenizer):
                         "corrected": "spelling",
                         "span_start": 2,
                         "span_end": 9,
+                        "correction_type": "spelling",
                     }
                 ],
             }
@@ -288,6 +293,7 @@ def test_oversized_word_retains_all_tokens_and_error_labels(tokenizer):
                         "corrected": "spelling",
                         "span_start": 0,
                         "span_end": 7,
+                        "correction_type": "spelling",
                     }
                 ],
             },

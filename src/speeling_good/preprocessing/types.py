@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import StrEnum, auto
 from typing import Literal
 
 
@@ -39,6 +40,22 @@ type AnnotationSource = Literal["original_data"] | str
 """Name of the model that performed the annotation, or original_data if this dataset contains spelling annotations"""
 
 
+class CorrectionType(StrEnum):
+    """Predicted kind of correction being made"""
+
+    SPELLING = auto()
+    WORD_SPLIT = auto()
+    DOUBLED_WORD = auto()
+    HYPHENATION = auto()
+    WRONG_WORD = auto()
+    INFLECTION = auto()
+    APOSTROPHE = auto()
+    PUNCTUATION = auto()
+    GRAMMAR = auto()
+    STYLE = auto()
+    OTHER = auto()
+
+
 @dataclass(frozen=True, slots=True)
 class SpellingAnnotation:
     """Correction for a single word (or words) of a passage"""
@@ -47,6 +64,7 @@ class SpellingAnnotation:
     corrected: str
     span_start: int
     span_end: int
+    correction_type: CorrectionType
 
 
 @dataclass(frozen=True, slots=True)

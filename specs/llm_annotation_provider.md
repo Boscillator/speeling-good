@@ -31,7 +31,19 @@ is controlled separately by the constructor argument `max_inflight=4`.
 - The class calls out to an OpenAI compatible LLM endpoint via the `openai` library.
 - It asks the LLM to identify all spelling mistakes in the provided passage.
 - It uses structured generation with Pydantic models to constrain the output.
-- The output should have the following fields per correction: `original`, `correction`, `before`, `after`.
+- The output has the required fields `original`, `correction`, `before`, `after`, and
+  `correction_type` per correction. The type is one of `spelling`, `word_split`,
+  `doubled_word`, `hyphenation`, `wrong_word`,
+  `inflection`, `apostrophe`, `punctuation`, `grammar`, `style`, or `other`.
+  It describes the actual edit; it does not expand the spelling-only detection policy.
+  `word_split` covers accidental word joins and splits; `spelling` covers nonword typos.
+  `doubled_word` covers removal of an accidentally repeated adjacent word;
+  `hyphenation` covers hyphen insertion, removal, or placement in a word or compound.
+  Prefer these specific categories over broader grammar, punctuation, or word-split labels.
+  Missing or invalid types are decoding failures, with the usual partial recovery
+  and retries. Resolved `SpellingAnnotation` objects and saved JSONL retain the type.
+  Old annotations without types must be regenerated into a fresh output directory;
+  resuming an existing run does not backfill types in completed shards.
 - The model should be prompted to correct spelling mistakes only, not grammar mistakes. Furthermore,
   correctly spelled proper nouns, technical terms, etc, are not spelling mistakes.
 - The client should use the context returned to find the actual span in the passage.

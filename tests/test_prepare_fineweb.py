@@ -12,6 +12,7 @@ from speeling_good.cli.prepare_fineweb import (
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
+    CorrectionType,
     EarlyDecision,
     PassageWithEarlyDecision,
     SpellingAnnotation,
@@ -34,7 +35,15 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
             return PreparedPassage(
                 AnnotatedPassage(
                     passage.text,
-                    [SpellingAnnotation("third", "thirds", 0, 5)],
+                    [
+                        SpellingAnnotation(
+                            "third",
+                            "thirds",
+                            0,
+                            5,
+                            correction_type=CorrectionType.SPELLING,
+                        )
+                    ],
                     [failure],
                 )
             )
@@ -52,7 +61,17 @@ def test_batches_are_bounded_and_count_failed_inputs_toward_take():
         [
             PreparedPassage(
                 AnnotatedPassage(
-                    "third", [SpellingAnnotation("third", "thirds", 0, 5)], [failure]
+                    "third",
+                    [
+                        SpellingAnnotation(
+                            "third",
+                            "thirds",
+                            0,
+                            5,
+                            correction_type=CorrectionType.SPELLING,
+                        )
+                    ],
+                    [failure],
                 )
             ),
             PreparedPassage(AnnotatedPassage("fourth", [])),

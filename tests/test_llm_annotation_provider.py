@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from threading import Event, Lock
 
 import httpx2 as httpx
@@ -11,6 +12,7 @@ from speeling_good.preprocessing.llm_annotation_provider import (
     LlmAnnotationProvider,
 )
 from speeling_good.preprocessing.types import (
+    CorrectionType,
     EarlyDecision,
     EarlyDecisionFailure,
     PassageWithEarlyDecision,
@@ -42,7 +44,13 @@ def test_early_decision_is_preserved_without_influencing_requests(
     assert result.decision == decision
     assert result.early_decision_failures == failures
     assert result.annotations == (
-        None if outcome == "exhaustion" else [SpellingAnnotation("teh", "the", 0, 3)]
+        None
+        if outcome == "exhaustion"
+        else [
+            SpellingAnnotation(
+                "teh", "the", 0, 3, correction_type=CorrectionType.SPELLING
+            )
+        ]
     )
     assert bool(result.failures) is (outcome != "success")
     assert all(
@@ -51,10 +59,13 @@ def test_early_decision_is_preserved_without_influencing_requests(
     )
 
 
-def correction(original, corrected, before="", after=""):
+def correction(
+    original, corrected, before="", after="", correction_type=CorrectionType.SPELLING
+):
     return {
         "original": original,
         "correction": corrected,
+        "correction_type": correction_type,
         "before": before,
         "after": after,
     }
@@ -82,6 +93,56 @@ def response(corrections):
             ],
         },
     )
+
+
+@pytest.mark.parametrize("category", list(CorrectionType))
+def test_predicted_type_survives_resolution_and_serialization(make_provider, category):
+    result = make_provider(
+        lambda _: response([correction("teh", "the", correction_type=category)])
+    ).annotate(PassageWithEarlyDecision("teh cat", None))
+
+    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3, category)]
+    saved = json.loads(json.dumps(asdict(result)))
+    assert saved["annotations"][0]["correction_type"] == category.value
+    assert not result.failures
+
+
+@pytest.mark.parametrize("invalid_type", ["missing", "unknown", None, 3])
+@pytest.mark.parametrize("recover", [False, True])
+def test_invalid_type_preserves_other_edits_and_retries(
+    make_provider, invalid_type, recover
+):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        wrong = correction("teh", "the")
+        if not recover or len(calls) == 1:
+            if invalid_type == "missing":
+                del wrong["correction_type"]
+            else:
+                wrong["correction_type"] = invalid_type
+        return response(
+            [
+                wrong,
+                correction("walk", "walks", correction_type=CorrectionType.INFLECTION),
+            ]
+        )
+
+    result = make_provider(handler, max_attempts=2).annotate(
+        PassageWithEarlyDecision("teh cat walk", None)
+    )
+
+    expected = [SpellingAnnotation("walk", "walks", 8, 12, CorrectionType.INFLECTION)]
+    if recover:
+        expected.insert(
+            0, SpellingAnnotation("teh", "the", 0, 3, CorrectionType.SPELLING)
+        )
+    assert result.annotations == expected
+    assert len(calls) == 2
+    assert "corrections.0.correction_type" in calls[1]["messages"][-1]["content"]
+    assert all(f.stage == "decoding" for f in result.failures)
+    assert len(result.failures) == (1 if recover else 2)
 
 
 @pytest.fixture
@@ -164,9 +225,13 @@ def test_exact_context_unicode_and_sorted_spans(make_provider):
     result = provider.annotate(PassageWithEarlyDecision(text, None))
     assert result.text == text
     assert result.annotations == [
-        SpellingAnnotation("teh", "the", 2, 5),
-        SpellingAnnotation("teh", "the", 14, 17),
-        SpellingAnnotation("wierd", "weird", 26, 31),
+        SpellingAnnotation("teh", "the", 2, 5, correction_type=CorrectionType.SPELLING),
+        SpellingAnnotation(
+            "teh", "the", 14, 17, correction_type=CorrectionType.SPELLING
+        ),
+        SpellingAnnotation(
+            "wierd", "weird", 26, 31, correction_type=CorrectionType.SPELLING
+        ),
     ]
 
 
@@ -190,7 +255,9 @@ def test_invalid_output_recovers_with_feedback(make_provider, bad):
     result = make_provider(handler).annotate(
         PassageWithEarlyDecision("teh cat, teh dog", None)
     )
-    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert result.annotations == [
+        SpellingAnnotation("teh", "the", 0, 3, correction_type=CorrectionType.SPELLING)
+    ]
     assert len(calls) == 2
     assert "Validation failed" in calls[1]["messages"][-1]["content"]
     assert calls[1]["messages"][-2] == {
@@ -265,7 +332,9 @@ def test_output_exhaustion_retains_partial_annotations(make_provider):
 
     result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
     assert len(calls) == 3
-    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert result.annotations == [
+        SpellingAnnotation("teh", "the", 0, 3, correction_type=CorrectionType.SPELLING)
+    ]
     assert [failure.attempt for failure in result.failures] == [1, 2, 3]
     assert all(failure.stage == "resolution" for failure in result.failures)
     assert all(
@@ -286,7 +355,9 @@ def test_schema_error_feedback_identifies_the_invalid_field(make_provider):
         return response([correction("teh", "the")])
 
     result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
-    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert result.annotations == [
+        SpellingAnnotation("teh", "the", 0, 3, correction_type=CorrectionType.SPELLING)
+    ]
     feedback = calls[1]["messages"][-1]["content"]
     assert "corrections.0.correction" in feedback
     assert "Field required" in feedback
@@ -349,7 +420,9 @@ def test_incomplete_or_refused_response_recovers(make_provider, finish_reason, r
         return httpx.Response(200, json=data)
 
     result = make_provider(handler).annotate(PassageWithEarlyDecision("teh cat", None))
-    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert result.annotations == [
+        SpellingAnnotation("teh", "the", 0, 3, correction_type=CorrectionType.SPELLING)
+    ]
     assert len(calls) == 2
     assert len(result.failures) == 1
     failure = result.failures[0]
@@ -380,13 +453,20 @@ def test_exhaustion_without_usable_annotations_is_not_a_clean_passage(
 def test_schema_and_resolution_failures_preserve_valid_entries(make_provider):
     items = [
         correction("teh", "the"),
-        {"original": "bad", "before": "", "after": ""},
+        {
+            "original": "bad",
+            "before": "",
+            "after": "",
+            "correction_type": "spelling",
+        },
         correction("absent", "word"),
     ]
     result = make_provider(lambda _: response(items), max_attempts=1).annotate(
         PassageWithEarlyDecision("teh cat", None)
     )
-    assert result.annotations == [SpellingAnnotation("teh", "the", 0, 3)]
+    assert result.annotations == [
+        SpellingAnnotation("teh", "the", 0, 3, correction_type=CorrectionType.SPELLING)
+    ]
     assert [failure.stage for failure in result.failures] == ["decoding", "resolution"]
     assert "corrections.1" in result.failures[0].error
     assert "corrections.2" in result.failures[1].error
@@ -413,13 +493,21 @@ def test_best_partial_attempt_is_selected_without_merging(make_provider, latest_
     )
     expected = (
         [
-            SpellingAnnotation("teh", "the", 0, 3),
-            SpellingAnnotation("wierd", "weird", 4, 9),
+            SpellingAnnotation(
+                "teh", "the", 0, 3, correction_type=CorrectionType.SPELLING
+            ),
+            SpellingAnnotation(
+                "wierd", "weird", 4, 9, correction_type=CorrectionType.SPELLING
+            ),
         ]
         if latest_count == 1
         else [
-            SpellingAnnotation("wierd", "weird", 4, 9),
-            SpellingAnnotation("speling", "spelling", 10, 17),
+            SpellingAnnotation(
+                "wierd", "weird", 4, 9, correction_type=CorrectionType.SPELLING
+            ),
+            SpellingAnnotation(
+                "speling", "spelling", 10, 17, correction_type=CorrectionType.SPELLING
+            ),
         ]
     )
     assert result.annotations == expected
@@ -538,7 +626,13 @@ def test_transport_exhaustion_retains_partial_results_and_diagnostics(
     )
     assert len(calls) == 3
     assert result.annotations == (
-        [SpellingAnnotation("teh", "the", 0, 3)] if partial else None
+        [
+            SpellingAnnotation(
+                "teh", "the", 0, 3, correction_type=CorrectionType.SPELLING
+            )
+        ]
+        if partial
+        else None
     )
     assert result.decision == decision
     assert [failure.attempt for failure in result.failures] == [1, 2, 3]
@@ -564,7 +658,13 @@ def test_token_limit_stops_repeated_capped_calls_and_preserves_best_result(
     )
     assert len(calls) == (2 if partial else 1)
     assert result.annotations == (
-        [SpellingAnnotation("teh", "the", 0, 3)] if partial else None
+        [
+            SpellingAnnotation(
+                "teh", "the", 0, 3, correction_type=CorrectionType.SPELLING
+            )
+        ]
+        if partial
+        else None
     )
     assert "length" in result.failures[-1].error
 
@@ -605,6 +705,11 @@ def test_shared_provider_limits_active_requests_and_keeps_results_separate(
     assert peak == 2
     assert [result.text for result in results] == [passage.text for passage in passages]
     assert all(
-        result.annotations == [SpellingAnnotation("teh", "the", 3, 6)]
+        result.annotations
+        == [
+            SpellingAnnotation(
+                "teh", "the", 3, 6, correction_type=CorrectionType.SPELLING
+            )
+        ]
         for result in results
     )
