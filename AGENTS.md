@@ -26,3 +26,6 @@ MODEL_ENDPOINT and MODEL_TOKEN enviroment variables include the information you 
 test against a live LLM server (either a local LM Studio with qwen/qwen3.8-27b or
 OpenRouter depending on my current needs)
 
+To run code that uses the GPU (ml training runs, etc.), you must request unsandboxed execution. 
+This should be approved automatically, and otherwise I will approve it.
+
