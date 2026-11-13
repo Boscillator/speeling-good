@@ -213,8 +213,20 @@ class SpeelingGood(L.LightningModule):
                         y="precision",
                         title="Misspelling token precision–recall",
                     ),
-                    "val/passage_evaluation": wandb.Table(
-                        columns=TABLE_COLUMNS, data=[row for _, row in selected]
+                    "val/passage_evaluation": wandb.EvalTable(
+                        columns=TABLE_COLUMNS,
+                        data=[row for _, row in selected],
+                        input_columns=["passage", "evaluated_end"],
+                        output_columns=[
+                            "predicted_spans",
+                            "reference_spans",
+                            "marked_passage",
+                        ],
+                        score_columns=[
+                            "true_positives",
+                            "false_positives",
+                            "false_negatives",
+                        ],
                     ),
                 },
                 # Lightning supplies the step when it commits validation scalars.
