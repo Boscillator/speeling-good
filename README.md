@@ -20,9 +20,14 @@ uv run prepare-fineweb output=data/fineweb-experiment annotation.temperature=0.5
 ```
 
 ## Training
+
+Use [config/train.yaml](config/train.yaml) for the first full run: three epochs
+on `data/fineweb`, with full validation after each epoch. Requires a GPU with
+bfloat16 support.
+
 ```sh
 uv run wandb login
-uv run train-discriminator
+uv run train-discriminator --config-name train
 ```
 
 ## Development
