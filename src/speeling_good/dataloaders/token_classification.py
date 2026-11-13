@@ -39,6 +39,7 @@ def prepare_dataset(
     tokenizer: PreTrainedTokenizerBase,
     *,
     max_length: int = 512,
+    include_metadata: bool = False,
 ) -> Dataset:
     """Clean and tokenize an indexed annotation dataset.
 
@@ -46,6 +47,7 @@ def prepare_dataset(
     clean passages; null annotations, blank text, and duplicate passages are
     excluded. Long passages are truncated; unsupervised passages are excluded.
     The returned dataset contains unpadded model inputs and BIO label IDs.
+    include_metadata retains text and character offsets for validation reporting.
     """
     if not tokenizer.is_fast:
         raise ValueError("A fast tokenizer is required for character offsets")
@@ -100,6 +102,9 @@ def prepare_dataset(
                 offsets, masks, batch["annotations"], strict=True
             )
         ]
+        if include_metadata:
+            encoding["text"] = batch["text"]
+            encoding["offset_mapping"] = offsets
         return dict(encoding)
 
     dataset = usable.map(
@@ -118,6 +123,34 @@ def prepare_dataset(
     return dataset
 
 
+class ValidationCollator:
+    """Keep passage metadata outside the padded model inputs."""
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
+        self.collator = DataCollatorForTokenClassification(tokenizer)
+        self.padding_side = tokenizer.padding_side
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        metadata = [
+            {key: feature[key] for key in ("text", "offset_mapping", "passage_index")}
+            for feature in features
+        ]
+        batch = self.collator(
+            [
+                {key: value for key, value in feature.items() if key not in metadata[0]}
+                for feature in features
+            ]
+        )
+        length = batch["labels"].shape[1]
+        for item in metadata:
+            offsets = item["offset_mapping"]
+            padding = [(0, 0)] * (length - len(offsets))
+            item["offset_mapping"] = (
+                offsets + padding if self.padding_side == "right" else padding + offsets
+            )
+        return {**batch, "metadata": metadata}
+
+
 def create_dataloaders(
     directory: str | Path,
     tokenizer: PreTrainedTokenizerBase,
@@ -127,7 +160,7 @@ def create_dataloaders(
     validation_fraction: float = 0.2,
     num_workers: int = 0,
     seed: int = 0,
-) -> tuple[DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
+) -> tuple[DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, Any]]]:
     """Load prepared shards and return training and validation loaders.
 
     Hugging Face caches the indexed dataset and tokenization on disk. The seed
@@ -141,7 +174,9 @@ def create_dataloaders(
     rows = load_dataset(
         "json", data_files=[str(path) for path in shards], split="train"
     )
-    dataset = prepare_dataset(rows, tokenizer, max_length=max_length)
+    dataset = prepare_dataset(
+        rows, tokenizer, max_length=max_length, include_metadata=True
+    )
     if len(dataset) < 2:
         raise ValueError("Need at least two distinct supervised passages")
     split = dataset.train_test_split(test_size=validation_fraction, seed=seed)
@@ -149,6 +184,10 @@ def create_dataloaders(
         "Training on {} passages; validating on {}",
         len(split["train"]),
         len(split["test"]),
+    )
+    split["train"] = split["train"].remove_columns(["text", "offset_mapping"])
+    split["test"] = split["test"].add_column(
+        "passage_index", list(range(len(split["test"])))
     )
     loaders = []
     for name in ("train", "test"):
@@ -160,7 +199,11 @@ def create_dataloaders(
                 shuffle=name == "train",
                 num_workers=num_workers,
                 generator=torch.Generator().manual_seed(seed),
-                collate_fn=DataCollatorForTokenClassification(tokenizer),
+                collate_fn=(
+                    DataCollatorForTokenClassification(tokenizer)
+                    if name == "train"
+                    else ValidationCollator(tokenizer)
+                ),
             )
         )
     return loaders[0], loaders[1]
