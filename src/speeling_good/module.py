@@ -23,7 +23,6 @@ from speeling_good.evaluation import (
     TABLE_COLUMNS,
     SpanDetectionMetrics,
     bio_spans,
-    evaluated_word_count,
     passage_evaluation,
 )
 from speeling_good.models import SpeelingGoodDescriminator
@@ -35,9 +34,9 @@ def passage_weighted_cross_entropy(
     is_clean: torch.Tensor,
     clean_passage_weight: float,
 ) -> torch.Tensor:
-    """Scale clean-passage token losses and average over supervised tokens.
+    """Scale clean-chunk token losses and average over supervised tokens.
 
-    Cleanliness comes from original annotations, before truncation. Ignored
+    Cleanliness comes from each chunk's BIO labels. Ignored
     labels (-100) contribute neither loss nor tokens to the denominator.
     """
     token_losses = F.cross_entropy(
@@ -178,9 +177,7 @@ class SpeelingGood(L.LightningModule):
             self.span_metrics.update(
                 predicted,
                 reference,
-                evaluated_word_count(
-                    metadata["text"], metadata["offset_mapping"], target
-                ),
+                metadata["word_count"],
             )
             if reference and len(self.evaluation_rows) < 100:
                 self.evaluation_rows.append(

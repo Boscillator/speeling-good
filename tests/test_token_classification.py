@@ -12,7 +12,11 @@ from torch.utils.data import Dataset as TorchDataset
 from transformers import DataCollatorForTokenClassification, PreTrainedTokenizerFast
 
 from speeling_good.dataloaders import prepare_dataset
-from speeling_good.dataloaders.token_classification import ValidationCollator
+from speeling_good.dataloaders.token_classification import (
+    ValidationCollator,
+    chunk_boundaries,
+)
+from speeling_good.evaluation import evaluated_word_count
 
 
 @pytest.fixture
@@ -45,7 +49,7 @@ def tokenizer():
     )
 
 
-def test_unicode_subwords_truncation_and_batch_padding(tokenizer):
+def test_unicode_subwords_chunking_and_batch_padding(tokenizer):
     rows = Dataset.from_list(
         [
             {
@@ -74,19 +78,28 @@ def test_unicode_subwords_truncation_and_batch_padding(tokenizer):
         iter(
             DataLoader(
                 cast(TorchDataset, dataset),
-                batch_size=2,
+                batch_size=3,
                 collate_fn=DataCollatorForTokenClassification(tokenizer),
             )
         )
     )
 
-    assert batch["input_ids"].tolist() == [[2, 4, 5, 6, 7, 3], [2, 7, 3, 1, 1, 1]]
+    assert batch["input_ids"].tolist() == [
+        [2, 4, 5, 6, 7, 3],
+        [2, 8, 3, 1, 1, 1],
+        [2, 7, 3, 1, 1, 1],
+    ]
     assert batch["labels"].tolist() == [
         [-100, 0, 1, 2, 0, -100],
+        [-100, 1, -100, -100, -100, -100],
         [-100, 0, -100, -100, -100, -100],
     ]
-    assert batch["attention_mask"].tolist() == [[1] * 6, [1, 1, 1, 0, 0, 0]]
-    assert batch["is_clean"].tolist() == [False, True]
+    assert batch["attention_mask"].tolist() == [
+        [1] * 6,
+        [1, 1, 1, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0],
+    ]
+    assert batch["is_clean"].tolist() == [False, False, True]
     assert batch["is_clean"].dtype == torch.bool
     assert set(batch) <= {
         "input_ids",
@@ -102,9 +115,7 @@ def test_unicode_subwords_truncation_and_batch_padding(tokenizer):
 
 @pytest.mark.parametrize("validation", [False, True])
 @pytest.mark.parametrize("padding_side", ["left", "right"])
-def test_cleanliness_uses_original_annotations_before_truncation(
-    tokenizer, validation, padding_side
-):
+def test_cleanliness_and_metadata_follow_chunks(tokenizer, validation, padding_side):
     tokenizer.padding_side = padding_side
     rows = Dataset.from_list(
         [
@@ -126,7 +137,7 @@ def test_cleanliness_uses_original_annotations_before_truncation(
         rows, tokenizer, max_length=4, include_metadata=validation
     )
     if validation:
-        dataset = dataset.add_column("passage_index", [0, 1])
+        dataset = dataset.add_column("passage_index", list(range(len(dataset))))
     collator = (
         ValidationCollator(tokenizer)
         if validation
@@ -134,11 +145,25 @@ def test_cleanliness_uses_original_annotations_before_truncation(
     )
     batch = collator(list(dataset))
 
-    assert batch["is_clean"].tolist() == [False, True]
+    assert batch["is_clean"].tolist() == [True, False, True]
     assert batch["is_clean"].dtype == torch.bool
-    assert batch["labels"][batch["labels"] != -100].tolist() == [0, 0, 0]
+    assert batch["labels"][batch["labels"] != -100].tolist() == [0, 0, 1, 2, 0]
     if validation:
-        assert [item["text"] for item in batch["metadata"]] == rows["text"]
+        assert [item["text"] for item in batch["metadata"]] == [
+            "okay okay",
+            "speling",
+            "okay",
+        ]
+        assert [
+            evaluated_word_count(item["text"], item["offset_mapping"], labels)
+            for item, labels in zip(
+                batch["metadata"], batch["labels"].tolist(), strict=True
+            )
+        ] == [2, 1, 1]
+        for item in batch["metadata"]:
+            assert (
+                min(start for start, end in item["offset_mapping"] if start != end) == 0
+            )
 
 
 def test_failed_annotations_are_excluded_but_clean_and_partial_rows_remain(tokenizer):
@@ -196,3 +221,94 @@ def test_only_blank_passages_are_rejected(tokenizer):
 
     with pytest.raises(ValueError, match="No nonblank passages"):
         prepare_dataset(rows, tokenizer)
+
+
+def test_chunk_boundary_keeps_multi_token_word_together(tokenizer):
+    rows = Dataset.from_list(
+        [
+            {
+                "text": "🐈 speling tail",
+                "annotations": [
+                    {
+                        "original": "speling",
+                        "corrected": "spelling",
+                        "span_start": 2,
+                        "span_end": 9,
+                    }
+                ],
+            }
+        ]
+    )
+    dataset = prepare_dataset(rows, tokenizer, max_length=4, include_metadata=True)
+
+    assert list(dataset["input_ids"]) == [[2, 4, 3], [2, 5, 6, 3], [2, 8, 3]]
+    assert list(dataset["labels"]) == [
+        [-100, 0, -100],
+        [-100, 1, 2, -100],
+        [-100, 0, -100],
+    ]
+    assert list(dataset["text"]) == ["🐈", "speling", "tail"]
+    assert list(dataset["offset_mapping"])[1] == [[0, 0], [0, 3], [3, 7], [0, 0]]
+    assert (
+        sum(
+            evaluated_word_count(row["text"], row["offset_mapping"], row["labels"])
+            for row in dataset
+        )
+        == 3
+    )
+
+
+@pytest.mark.parametrize(
+    "text,offsets,budget,expected",
+    [
+        (
+            "🐈 speling tail",
+            [(0, 1), (2, 5), (5, 9), (10, 14)],
+            2,
+            [(0, 1), (1, 3), (3, 4)],
+        ),
+        ("speling", [(0, 3), (3, 7)], 1, [(0, 1), (1, 2)]),
+        ("", [], 2, [(0, 0)]),
+        ("okay\n\ttail", [(0, 4), (6, 10)], 1, [(0, 1), (1, 2)]),
+        ("okay tail", [(0, 4), (4, 9)], 1, [(0, 1), (1, 2)]),
+    ],
+)
+def test_chunk_boundaries_prefer_whole_words(text, offsets, budget, expected):
+    assert chunk_boundaries(text, offsets, budget) == expected
+
+
+def test_oversized_word_retains_all_tokens_and_error_labels(tokenizer):
+    rows = Dataset.from_list(
+        [
+            {
+                "text": "speling",
+                "annotations": [
+                    {
+                        "original": "speling",
+                        "corrected": "spelling",
+                        "span_start": 0,
+                        "span_end": 7,
+                    }
+                ],
+            },
+            {"text": "speling tail", "annotations": []},
+        ]
+    )
+    dataset = prepare_dataset(rows, tokenizer, max_length=3, include_metadata=True)
+    assert list(dataset["input_ids"]) == [
+        [2, 5, 3],
+        [2, 6, 3],
+        [2, 5, 3],
+        [2, 6, 3],
+        [2, 8, 3],
+    ]
+    assert list(dataset["labels"]) == [
+        [-100, 1, -100],
+        [-100, 1, -100],
+        [-100, 0, -100],
+        [-100, 0, -100],
+        [-100, 0, -100],
+    ]
+
+    assert list(dataset["word_count"]) == [1, 0, 1, 0, 1]
+    assert list(dataset["is_clean"]) == [False, False, True, True, True]

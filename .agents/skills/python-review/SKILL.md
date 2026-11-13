@@ -72,6 +72,11 @@ when traversal state or random access would add complexity without helping.
 
 ### Test pure business logic directly
 
+When chunking natural-language input, prefer word boundaries within the size
+budget so preprocessing does not create artificial word fragments. Keep a
+documented fallback for a word that exceeds the budget rather than discarding
+content or exceeding the model limit.
+
 A pure function that performs meaningful decisions, matching, transformations, or
 validation deserves direct unit tests rather than coverage only through a service
 wrapper. Expose it as a public function when it represents an independently useful
