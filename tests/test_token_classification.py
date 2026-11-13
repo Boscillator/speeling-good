@@ -120,3 +120,27 @@ def test_no_usable_annotations(tokenizer):
 
     with pytest.raises(ValueError, match="No passages with usable annotations"):
         prepare_dataset(rows, tokenizer)
+
+
+def test_blank_and_duplicate_passages_are_excluded_before_tokenization(tokenizer):
+    rows = Dataset.from_list(
+        [
+            {"text": "okay", "annotations": None},
+            {"text": " \n\t", "annotations": []},
+            {"text": "okay", "annotations": []},
+            {"text": "okay", "annotations": []},
+            {"text": "tail", "annotations": []},
+        ]
+    )
+
+    dataset = prepare_dataset(rows, tokenizer)
+
+    assert list(dataset["input_ids"]) == [[2, 7, 3], [2, 8, 3]]
+    assert list(dataset["labels"]) == [[-100, 0, -100], [-100, 0, -100]]
+
+
+def test_only_blank_passages_are_rejected(tokenizer):
+    rows = Dataset.from_list([{"text": " \n\t", "annotations": []}])
+
+    with pytest.raises(ValueError, match="No nonblank passages"):
+        prepare_dataset(rows, tokenizer)

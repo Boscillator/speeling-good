@@ -36,6 +36,11 @@ or a framework of tiny helpers that makes readers chase the implementation.
 Keep per-call state local and preserve concurrency and retry semantics when
 refactoring those concerns.
 
+Keep dataset loading, cleaning, and train/validation splitting in the dataset or
+dataloader layer. Training entrypoints should configure and consume loaders rather
+than duplicate their preparation logic. Expose meaningful data options through
+that layer when callers need them.
+
 Separate per-item validation or matching from collection-level conflict handling,
 and response validation from decoding and result assembly, when those concerns
 obscure the overall flow. Prefer explicit local results over helpers that mutate

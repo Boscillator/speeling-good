@@ -1,14 +1,16 @@
 """Build indexed training batches from prepared annotation shards.
 
+TODO: Rename to dataloader.py
+
 Example::
 
     from transformers import AutoModelForTokenClassification, AutoTokenizer
-    from speeling_good.dataloaders import create_dataloader
+    from speeling_good.dataloaders import create_dataloaders
     from speeling_good.dataloaders.annotation_to_bio import ID2LABEL, LABEL2ID
 
     checkpoint = "answerdotai/ModernBERT-base"
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, use_fast=True)
-    loader = create_dataloader("data/fineweb", tokenizer)
+    loader, validation_loader = create_dataloaders("data/fineweb", tokenizer)
     model = AutoModelForTokenClassification.from_pretrained(
         checkpoint, num_labels=3, id2label=ID2LABEL, label2id=LABEL2ID
     )
@@ -38,10 +40,11 @@ def prepare_dataset(
     *,
     max_length: int = 512,
 ) -> Dataset:
-    """Filter failed annotations and tokenize an indexed annotation dataset.
+    """Clean and tokenize an indexed annotation dataset.
 
     Only text and annotations are consumed. Empty annotation lists represent
-    clean passages; null annotations are excluded. Long passages are truncated.
+    clean passages; null annotations, blank text, and duplicate passages are
+    excluded. Long passages are truncated; unsupervised passages are excluded.
     The returned dataset contains unpadded model inputs and BIO label IDs.
     """
     if not tokenizer.is_fast:
@@ -67,6 +70,16 @@ def prepare_dataset(
     if not len(usable):
         raise ValueError("No passages with usable annotations remain")
 
+    seen: set[str] = set()
+    indices = []
+    for index, text in enumerate(usable["text"]):
+        if text.strip() and text not in seen:
+            seen.add(text)
+            indices.append(index)
+    usable = usable.select(indices)
+    if not len(usable):
+        raise ValueError("No nonblank passages with usable annotations remain")
+
     def encode(batch: dict[str, Any]) -> dict[str, Any]:
         encoding = tokenizer(
             batch["text"],
@@ -89,46 +102,65 @@ def prepare_dataset(
         ]
         return dict(encoding)
 
-    return usable.map(
+    dataset = usable.map(
         encode,
         batched=True,
         remove_columns=usable.column_names,
         desc="Tokenizing annotated passages",
     )
+    dataset = dataset.filter(
+        lambda labels: any(label != -100 for label in labels),
+        input_columns=["labels"],
+        desc="Filtering unsupervised passages",
+    )
+    if not len(dataset):
+        raise ValueError("No supervised passages remain")
+    return dataset
 
 
-def create_dataloader(
-    data_dir: str | Path,
+def create_dataloaders(
+    directory: str | Path,
     tokenizer: PreTrainedTokenizerBase,
     *,
     batch_size: int = 8,
     max_length: int = 512,
-    shuffle: bool = True,
+    validation_fraction: float = 0.2,
     num_workers: int = 0,
     seed: int = 0,
-) -> DataLoader[dict[str, torch.Tensor]]:
-    """Read sorted part-*.jsonl shards and return dynamically padded CPU batches.
+) -> tuple[DataLoader[dict[str, torch.Tensor]], DataLoader[dict[str, torch.Tensor]]]:
+    """Load prepared shards and return training and validation loaders.
 
     Hugging Face caches the indexed dataset and tokenization on disk. The seed
     controls shuffling; successive epochs advance the generator normally.
+    Duplicate passages are removed before the seeded split to prevent leakage.
     Labels for special tokens and batch padding are -100, ignored by the loss.
     """
-    shards = sorted(Path(data_dir).glob("part-*.jsonl"))
+    shards = sorted(Path(directory).glob("part-*.jsonl"))
     if not shards:
-        raise FileNotFoundError(f"No part-*.jsonl shards found in {data_dir}")
+        raise FileNotFoundError(f"No part-*.jsonl shards found in {directory}")
     rows = load_dataset(
         "json", data_files=[str(path) for path in shards], split="train"
     )
     dataset = prepare_dataset(rows, tokenizer, max_length=max_length)
-    return DataLoader(
-        # HF datasets implement PyTorch's indexed dataset protocol without
-        # inheriting its Dataset class.
-        cast(TorchDataset, dataset),
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        generator=torch.Generator().manual_seed(seed),
-        collate_fn=DataCollatorForTokenClassification(
-            tokenizer, label_pad_token_id=-100, return_tensors="pt"
-        ),
+    if len(dataset) < 2:
+        raise ValueError("Need at least two distinct supervised passages")
+    split = dataset.train_test_split(test_size=validation_fraction, seed=seed)
+    logger.info(
+        "Training on {} passages; validating on {}",
+        len(split["train"]),
+        len(split["test"]),
     )
+    loaders = []
+    for name in ("train", "test"):
+        loaders.append(
+            DataLoader(
+                # HF datasets implement PyTorch's indexed dataset protocol.
+                cast(TorchDataset, split[name]),
+                batch_size=batch_size,
+                shuffle=name == "train",
+                num_workers=num_workers,
+                generator=torch.Generator().manual_seed(seed),
+                collate_fn=DataCollatorForTokenClassification(tokenizer),
+            )
+        )
+    return loaders[0], loaders[1]

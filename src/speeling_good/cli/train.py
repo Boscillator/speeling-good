@@ -1,27 +1,25 @@
 """Train a BIO spelling discriminator on prepared part-*.jsonl shards."""
 
-from itertools import islice
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Literal
+from uuid import uuid4
 
 import hydra
 import lightning as L
 import torch
-from datasets import Dataset, load_dataset
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.loggers import WandbLogger
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, Field
-from torch.utils.data import DataLoader
-from torch.utils.data import Dataset as TorchDataset
 from transformers import (
     AutoTokenizer,
-    DataCollatorForTokenClassification,
     PreTrainedTokenizerBase,
 )
 
-from speeling_good.dataloaders import prepare_dataset
+from speeling_good.dataloaders import create_dataloaders
 from speeling_good.module import SpeelingGood
 
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
@@ -39,7 +37,6 @@ class ModelConfig(BaseModel):
 class DataConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     directory: Path = Path("data/fineweb")
-    take: PositiveInt | None = 64
     validation_fraction: Annotated[float, Field(gt=0, lt=1)] = 0.2
     batch_size: PositiveInt = 2
     max_length: PositiveInt = 128
@@ -62,6 +59,13 @@ class TrainerConfig(BaseModel):
     fast_dev_run: bool = False
 
 
+class WandbConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: Annotated[str, Field(min_length=1)] = "speeling-good"
+    entity: Annotated[str, Field(min_length=1)] | None = None
+    name: Annotated[str, Field(min_length=1)] | None = None
+
+
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: int = 42
@@ -70,31 +74,34 @@ class TrainConfig(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     data: DataConfig = Field(default_factory=DataConfig)
     trainer: TrainerConfig = Field(default_factory=TrainerConfig)
+    wandb: WandbConfig = Field(default_factory=WandbConfig)
 
 
-def load_rows(config: DataConfig) -> Dataset:
-    """Bound smoke-run input before reading/tokenizing the whole dataset."""
-    shards = sorted(config.directory.glob("part-*.jsonl"))
-    if not shards:
-        raise FileNotFoundError(f"No part-*.jsonl shards found in {config.directory}")
-    files = [str(path) for path in shards]
-    if config.take is None:
-        rows = load_dataset("json", data_files=files, split="train")
+@contextmanager
+def tracking_run(
+    config: TrainConfig, run_dir: Path, run_id: str
+) -> Generator[WandbLogger | Literal[False]]:
+    """Own the W&B lifecycle, including errors outside Trainer.fit."""
+    if config.trainer.fast_dev_run:
+        yield False
+        return
+    wandb_logger = WandbLogger(
+        **config.wandb.model_dump(exclude_none=True),
+        save_dir=str(run_dir),
+        id=run_id,
+        resume="never",
+        log_model=False,
+    )
+    experiment = wandb_logger.experiment
+    try:
+        wandb_logger.log_hyperparams(config.model_dump(mode="json"))
+        logger.info("W&B run: {}", experiment.url)
+        yield wandb_logger
+    except BaseException:
+        experiment.finish(exit_code=1)
+        raise
     else:
-        stream = load_dataset("json", data_files=files, split="train", streaming=True)
-        rows = Dataset.from_list(list(islice(stream, config.take)))
-    rows = rows.filter(lambda row: row["annotations"] is not None)
-    # Repeated passages must not leak between training and validation.
-    seen: set[str] = set()
-    indices = []
-    for index, text in enumerate(rows["text"]):
-        if text.strip() and text not in seen:
-            seen.add(text)
-            indices.append(index)
-    rows = rows.select(indices)
-    if len(rows) < 2:
-        raise ValueError("Need at least two distinct passages with usable annotations")
-    return rows
+        experiment.finish(exit_code=0)
 
 
 def train(config: TrainConfig) -> L.Trainer:
@@ -103,41 +110,15 @@ def train(config: TrainConfig) -> L.Trainer:
     tokenizer = AutoTokenizer.from_pretrained(config.model.model_name, use_fast=True)
     if not isinstance(tokenizer, PreTrainedTokenizerBase):
         raise TypeError("Expected a pretrained tokenizer")
-    rows = load_rows(config.data)
-    split = rows.train_test_split(
-        test_size=config.data.validation_fraction, seed=config.seed
+    train_loader, validation_loader = create_dataloaders(
+        tokenizer=tokenizer,
+        seed=config.seed,
+        **config.data.model_dump(),
     )
-    loaders = {}
-    sizes = {}
-    for name in ("train", "test"):
-        dataset = prepare_dataset(
-            split[name], tokenizer, max_length=config.data.max_length
-        )
-        # Exclude passages whose tokenization contains no supervised tokens.
-        dataset = dataset.filter(
-            lambda row: any(label != -100 for label in row["labels"])
-        )
-        if not len(dataset):
-            raise ValueError(f"No supervised passages in {name} split")
-        sizes[name] = len(dataset)
-        loaders[name] = DataLoader(
-            cast(TorchDataset, dataset),
-            batch_size=config.data.batch_size,
-            shuffle=name == "train",
-            num_workers=config.data.num_workers,
-            generator=torch.Generator().manual_seed(config.seed),
-            collate_fn=DataCollatorForTokenClassification(tokenizer),
-        )
-    logger.info(
-        "Training on {} passages; validating on {}",
-        sizes["train"],
-        sizes["test"],
-    )
-    # Each invocation gets a separate version directory, including resumed runs.
-    csv_logger = CSVLogger(str(config.output), name="")
-    _ = csv_logger.experiment  # Initialize before writing artifacts into log_dir.
-    run_dir = Path(csv_logger.log_dir)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # Resuming training starts a new experiment with its own local artifacts.
+    run_id = uuid4().hex
+    run_dir = config.output / run_id
+    run_dir.mkdir(parents=True)
     (run_dir / "config.yaml").write_text(
         OmegaConf.to_yaml(OmegaConf.create(config.model_dump(mode="json")))
     )
@@ -157,18 +138,22 @@ def train(config: TrainConfig) -> L.Trainer:
         )
     else:
         model = SpeelingGood(**config.model.model_dump())
-    trainer = L.Trainer(
-        **config.trainer.model_dump(),
-        default_root_dir=str(run_dir),
-        logger=csv_logger,
-        callbacks=[checkpoint, LearningRateMonitor(logging_interval="step")],
-    )
-    trainer.fit(
-        model,
-        train_dataloaders=loaders["train"],
-        val_dataloaders=loaders["test"],
-        ckpt_path=config.resume_from,
-    )
+    callbacks: list[L.Callback] = [checkpoint]
+    if not config.trainer.fast_dev_run:
+        callbacks.append(LearningRateMonitor(logging_interval="step"))
+    with tracking_run(config, run_dir, run_id) as run_logger:
+        trainer = L.Trainer(
+            **config.trainer.model_dump(),
+            default_root_dir=str(run_dir),
+            logger=run_logger,
+            callbacks=callbacks,
+        )
+        trainer.fit(
+            model,
+            train_dataloaders=train_loader,
+            val_dataloaders=validation_loader,
+            ckpt_path=config.resume_from,
+        )
     logger.info(
         "Run artifacts: {}; best checkpoint: {}",
         run_dir,
