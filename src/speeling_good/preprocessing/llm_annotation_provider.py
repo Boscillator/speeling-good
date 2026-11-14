@@ -18,6 +18,10 @@ from openai import (
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from speeling_good.preprocessing.annotation_postprocessing import (
+    canonicalize_edit,
+    is_in_scope,
+)
 from speeling_good.preprocessing.types import (
     AnnotatedPassage,
     AnnotationFailure,
@@ -124,15 +128,25 @@ def _resolve_correction(text: str, item: Correction) -> SpellingAnnotation:
 def _exclude_conflicts(
     annotations: list[tuple[int, SpellingAnnotation]],
 ) -> tuple[list[SpellingAnnotation], list[str]]:
-    """Sort spans and exclude every edit involved in a duplicate or overlap."""
+    """Deduplicate equivalent edits and exclude every conflicting overlap.
+
+    Conflict positions are independent of response indexes: a single response
+    entry can yield several independent annotations after canonicalization.
+    """
+    unique: dict[tuple[int, int, str], tuple[int, SpellingAnnotation]] = {}
+    for index, annotation in annotations:
+        key = (annotation.span_start, annotation.span_end, annotation.corrected)
+        unique.setdefault(key, (index, annotation))
+    annotations = list(unique.values())
     annotations = sorted(annotations, key=lambda item: item[1].span_start)
     conflicts: set[int] = set()
     errors: list[str] = []
     for position, (left_index, left) in enumerate(annotations):
-        for right_index, right in annotations[position + 1 :]:
+        for right_position in range(position + 1, len(annotations)):
+            right_index, right = annotations[right_position]
             if right.span_start >= left.span_end:
                 break
-            conflicts.update((left_index, right_index))
+            conflicts.update((position, right_position))
             reason = (
                 "duplicate span"
                 if (left.span_start, left.span_end)
@@ -142,7 +156,11 @@ def _exclude_conflicts(
             errors.append(
                 f"corrections.{left_index} and corrections.{right_index}: {reason}"
             )
-    return [item for index, item in annotations if index not in conflicts], errors
+    return [
+        item
+        for position, (_, item) in enumerate(annotations)
+        if position not in conflicts
+    ], errors
 
 
 def resolve_partial(
@@ -152,14 +170,20 @@ def resolve_partial(
 
     Each correction is paired with its unique, zero-based index in the original
     response, preserving diagnostic locations when schema-invalid entries were
-    skipped. Every correction involved in a duplicate or overlap is excluded.
+    skipped. Exactly resolved edits are canonicalized and scope-filtered before
+    deduplication and overlap rejection. Intentional scope exclusions are not errors.
     Neither the text nor the supplied corrections are modified.
     """
     resolved: list[tuple[int, SpellingAnnotation]] = []
     errors: list[str] = []
     for index, item in corrections:
         try:
-            resolved.append((index, _resolve_correction(text, item)))
+            annotation = _resolve_correction(text, item)
+            resolved.extend(
+                (index, edit)
+                for edit in canonicalize_edit(annotation, text)
+                if is_in_scope(edit)
+            )
         except AnnotationError as error:
             errors.append(f"corrections.{index}: {error}")
     annotations, conflicts = _exclude_conflicts(resolved)
@@ -255,7 +279,7 @@ class LlmAnnotationProvider:
     and invalid output use jittered exponential backoff (1–8 seconds before jitter),
     or Retry-After capped at 30 seconds. Other HTTP errors fail immediately.
 
-    Context is matched exactly; ambiguous, missing, duplicate, or overlapping spans
+    Context is matched exactly; ambiguous, missing, or conflicting overlapping spans
     retry the entire passage with validation feedback. Invalid responses are retained
     in the result. Exhaustion returns the best partial annotations (latest on ties),
     or None if none are usable, including on transient transport exhaustion.

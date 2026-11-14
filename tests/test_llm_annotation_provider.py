@@ -713,3 +713,24 @@ def test_shared_provider_limits_active_requests_and_keeps_results_separate(
         ]
         for result in results
     )
+
+
+@pytest.mark.parametrize("invalid_locator", [False, True])
+def test_scope_exclusions_do_not_hide_resolution_failures(
+    make_provider, invalid_locator
+):
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        edits = [correction("that", "on that")]
+        if invalid_locator:
+            edits.append(correction("absent", "word"))
+        return response(edits)
+
+    result = make_provider(handler, max_attempts=2).annotate(
+        PassageWithEarlyDecision("that", None)
+    )
+    assert result.annotations == (None if invalid_locator else [])
+    assert len(calls) == (2 if invalid_locator else 1)
+    assert bool(result.failures) is invalid_locator

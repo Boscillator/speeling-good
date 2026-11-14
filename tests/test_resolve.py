@@ -128,7 +128,7 @@ from speeling_good.preprocessing.types import CorrectionType, SpellingAnnotation
             ],
             [
                 SpellingAnnotation(
-                    "teh,", "the,", 0, 4, correction_type=CorrectionType.SPELLING
+                    "teh", "the", 0, 3, correction_type=CorrectionType.SPELLING
                 ),
                 SpellingAnnotation(
                     "wrng", "wrong", 4, 8, correction_type=CorrectionType.SPELLING
@@ -192,27 +192,6 @@ def test_resolve_spans(text, corrections, expected):
                     correction_type=CorrectionType.SPELLING,
                 ),
                 Correction(
-                    original="teh",
-                    correction="the",
-                    before="",
-                    after=" cat",
-                    correction_type=CorrectionType.SPELLING,
-                ),
-            ],
-            [],
-            id="duplicate-span-with-different-context",
-        ),
-        pytest.param(
-            "teh cat",
-            [
-                Correction(
-                    original="teh",
-                    correction="the",
-                    before="",
-                    after="",
-                    correction_type=CorrectionType.SPELLING,
-                ),
-                Correction(
                     original="missing",
                     correction="word",
                     before="",
@@ -257,12 +236,15 @@ def correction(original, corrected, before="", after=""):
         pytest.param([correction("", "word")], "nonempty", id="empty-original"),
         pytest.param([correction("teh", "")], "nonempty", id="empty-correction"),
         pytest.param(
-            [correction("teh", "the", after=" cat")] * 2,
+            [
+                correction("teh", "the", after=" cat"),
+                correction("teh", "ten", after=" cat"),
+            ],
             "duplicate",
             id="duplicate-span",
         ),
         pytest.param(
-            [correction("teh", "the", after=" cat"), correction("teh cat", "the cat")],
+            [correction("teh", "the", after=" cat"), correction("teh cat", "teh-cat")],
             "overlapping",
             id="overlapping-spans",
         ),
@@ -289,7 +271,7 @@ def test_partial_resolution_preserves_unrelated_corrections(invalid, reason):
     assert corrections == originals
 
 
-def test_partial_resolution_excludes_every_correction_in_a_containing_span():
+def test_normalization_removes_unrelated_context_before_conflict_checks():
     corrections = [
         correction("teh cat", "the cat"),
         correction("teh", "the"),
@@ -300,16 +282,11 @@ def test_partial_resolution_excludes_every_correction_in_a_containing_span():
     annotations, errors = resolve_partial("teh cat wierd", list(enumerate(corrections)))
 
     assert annotations == [
-        SpellingAnnotation(
-            "wierd", "weird", 8, 13, correction_type=CorrectionType.SPELLING
-        )
+        SpellingAnnotation("teh", "the", 0, 3, CorrectionType.SPELLING),
+        SpellingAnnotation("cat", "cats", 4, 7, CorrectionType.SPELLING),
+        SpellingAnnotation("wierd", "weird", 8, 13, CorrectionType.SPELLING),
     ]
-    assert any(
-        "corrections.0" in error and "corrections.1" in error for error in errors
-    )
-    assert any(
-        "corrections.0" in error and "corrections.2" in error for error in errors
-    )
+    assert errors == []
 
 
 def test_partial_resolution_preserves_original_response_indices():
@@ -323,3 +300,41 @@ def test_partial_resolution_preserves_original_response_indices():
     ]
     assert len(errors) == 1
     assert "corrections.5" in errors[0]
+
+
+def test_equivalent_normalized_edits_are_deduplicated():
+    annotations, errors = resolve_partial(
+        "a tees worth",
+        [
+            (0, correction("a tees worth", "a tee's worth")),
+            (1, correction("tees", "tee's")),
+        ],
+    )
+    assert annotations == [
+        SpellingAnnotation("tees", "tee's", 2, 6, CorrectionType.SPELLING)
+    ]
+    assert errors == []
+
+
+def test_conflict_in_one_split_edit_preserves_its_independent_sibling():
+    annotations, errors = resolve_partial(
+        "its Harvards",
+        [
+            (2, correction("its Harvards", "it's Harvard's")),
+            (5, correction("its", "his")),
+        ],
+    )
+    assert annotations == [
+        SpellingAnnotation("Harvards", "Harvard's", 4, 12, CorrectionType.SPELLING)
+    ]
+    assert len(errors) == 1
+    assert "corrections.2" in errors[0] and "corrections.5" in errors[0]
+
+
+def test_expanding_clipped_edits_exposes_conflicting_replacements():
+    annotations, errors = resolve_partial(
+        "wrong",
+        [(0, correction("wr", "wro")), (1, correction("wrong", "wrung"))],
+    )
+    assert annotations == []
+    assert len(errors) == 1
