@@ -43,6 +43,7 @@ explicit = true
 
 [dependency-groups]
 dev = [
+    "nbconvert>=7.17.2",
     "pyright>=1.1.414",
     "ruff>=0.17.4",
     "ty>=0.0.101",

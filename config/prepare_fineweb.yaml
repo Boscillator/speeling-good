@@ -8,8 +8,8 @@ dataset: HuggingFaceFW/fineweb
 subset: sample-10BT
 split: train
 # null removes the input limit.
-take: 1000
-output: data/fineweb
+take: 50000
+output: data/fineweb-2
 workers: 8
 shard_size: 100
 p_annotated_anyway: 1.0
